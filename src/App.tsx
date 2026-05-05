@@ -714,7 +714,8 @@ export function App() {
   const canStop = playbackSnapshot.playing || playbackSnapshot.offset > 0;
   const carrierPanelLabel = carrierNotice
     || (carrierFile && carrierBuffer ? `${carrierFile.name} · ${formatDuration(carrierBuffer.duration)}` : "Drop audio here or click to select");
-  const playLabel = playbackSnapshot.playing ? "Pause" : isPreparing ? "Applying..." : "Play";
+  const playLabel = playbackSnapshot.playing ? "Pause" : isPreparing ? "Applying payload" : "Play";
+  const PlayIcon = playbackSnapshot.playing ? IconMdiPause : IconMdiPlay;
   const exportLabel = isExporting ? "Exporting..." : "Export";
   const transportNotice = isPreparing ? "Applying payload..." : actionNotice;
   const visualizerData = activeAugmented?.dataBuffer ?? (activeDetected ? detectedDataBuffer : null);
@@ -776,8 +777,12 @@ export function App() {
           <section className="visual-panel" aria-label="Live Fourier view">
             <div className="transport-panel" aria-label="Transport">
               <div className="transport">
-                <button type="button" disabled={!hasCarrier || (!playbackSnapshot.playing && (isPreparing || isExporting))} onClick={() => void togglePlay()}>{playLabel}</button>
-                <button type="button" disabled={!canStop} onClick={stopPlayback}>Stop</button>
+                <button className="transport-icon-button" type="button" aria-label={playLabel} title={playLabel} disabled={!hasCarrier || (!playbackSnapshot.playing && (isPreparing || isExporting))} onClick={() => void togglePlay()}>
+                  <PlayIcon aria-hidden="true" focusable="false" />
+                </button>
+                <button className="transport-icon-button" type="button" aria-label="Stop" title="Stop" disabled={!canStop} onClick={stopPlayback}>
+                  <IconMdiStop aria-hidden="true" focusable="false" />
+                </button>
                 {transportNotice ? <span className="transport-status">{transportNotice}</span> : null}
                 <button className="export-button" type="button" disabled={!canExport || isPreparing || isExporting} onClick={() => void exportCurrentAudio()}>{exportLabel}</button>
               </div>
