@@ -56,7 +56,12 @@ declare module "three" {
     setDrawRange(start: number, count: number): void;
   }
 
+  export class Color {
+    setStyle(style: string): this;
+  }
+
   export class PointsMaterial {
+    color: Color;
     opacity: number;
     size: number;
     constructor(parameters: {
@@ -70,6 +75,7 @@ declare module "three" {
   }
 
   export class LineBasicMaterial {
+    color: Color;
     opacity: number;
     constructor(parameters: {
       color?: string;
