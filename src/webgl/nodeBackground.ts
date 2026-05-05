@@ -34,17 +34,22 @@ const MAX_CONNECTIONS = 420;
 const CAMERA_Z = 9;
 const SCENE_DEPTH = 7;
 const BASE_NODE_SIZE = 0.035;
-const NODE_SIZE_GAIN = 0.055;
+const NODE_SIZE_GAIN = 0.085;
+const PLAYING_NODE_SIZE_BOOST = 0.024;
+const PLAYING_OPACITY_BOOST = 0.14;
 const BASE_DRIFT_SPEED = 0.0035;
 const AUDIO_DRIFT_GAIN = 0.009;
 const FALLBACK_CONNECTION_DISTANCE_PX = 132;
 const FALLBACK_NODE_RADIUS_PX = 1.8;
+const FALLBACK_PLAYING_NODE_RADIUS_BOOST_PX = 1.6;
 const MIN_RENDER_SIZE_PX = 1;
 
 const COLORS = {
   background: "#05070d",
   node: "#dbeafe",
+  nodeActive: "#d8ff4f",
   connection: "#60a5fa",
+  connectionActive: "#54e7ff",
 };
 
 const SILENT_METRICS: AudioMetrics = {
@@ -144,9 +149,12 @@ function createThreeNodeField(canvas: HTMLCanvasElement): AudioNodeField {
     updateNodes(nodes, metrics);
     writePointPositions(nodes, pointPositions);
     pointPositionAttribute.needsUpdate = true;
-    pointMaterial.size = BASE_NODE_SIZE + metrics.treble * NODE_SIZE_GAIN;
-    lineMaterial.opacity = 0.16 + metrics.mid * 0.34;
-    writeConnections(nodes, linePositions, lineGeometry, CONNECTION_DISTANCE + metrics.bass * 0.7);
+    pointMaterial.size = BASE_NODE_SIZE + metrics.treble * NODE_SIZE_GAIN + (metrics.playing ? PLAYING_NODE_SIZE_BOOST : 0);
+    pointMaterial.opacity = 0.76 + metrics.treble * 0.16 + (metrics.playing ? PLAYING_OPACITY_BOOST : 0);
+    pointMaterial.color.setStyle(metrics.playing ? COLORS.nodeActive : COLORS.node);
+    lineMaterial.opacity = 0.16 + metrics.mid * 0.46 + (metrics.playing ? PLAYING_OPACITY_BOOST : 0);
+    lineMaterial.color.setStyle(metrics.playing ? COLORS.connectionActive : COLORS.connection);
+    writeConnections(nodes, linePositions, lineGeometry, CONNECTION_DISTANCE + metrics.bass * 1.05);
     points.rotation.y += 0.0008 + metrics.waveform * 0.002;
     lines.rotation.copy(points.rotation);
     renderer.render(scene, camera);
@@ -368,8 +376,8 @@ function drawFallbackConnections(
   const width = context.canvas.clientWidth || window.innerWidth;
   const height = context.canvas.clientHeight || window.innerHeight;
   const distanceLimit = FALLBACK_CONNECTION_DISTANCE_PX + metrics.mid * 72;
-  context.strokeStyle = COLORS.connection;
-  context.globalAlpha = 0.14 + metrics.mid * 0.3;
+  context.strokeStyle = metrics.playing ? COLORS.connectionActive : COLORS.connection;
+  context.globalAlpha = 0.14 + metrics.mid * 0.42 + (metrics.playing ? 0.12 : 0);
   context.lineWidth = 1;
 
   for (let firstIndex = 0; firstIndex < nodes.length; firstIndex += 1) {
@@ -402,12 +410,18 @@ function drawFallbackNodes(
 ): void {
   const width = context.canvas.clientWidth || window.innerWidth;
   const height = context.canvas.clientHeight || window.innerHeight;
-  context.fillStyle = COLORS.node;
-  context.globalAlpha = 0.78;
+  context.fillStyle = metrics.playing ? COLORS.nodeActive : COLORS.node;
+  context.globalAlpha = 0.78 + metrics.treble * 0.12 + (metrics.playing ? 0.08 : 0);
 
   for (const node of nodes) {
     context.beginPath();
-    context.arc(node.x * width, node.y * height, FALLBACK_NODE_RADIUS_PX + metrics.treble * 2.4, 0, Math.PI * 2);
+    context.arc(
+      node.x * width,
+      node.y * height,
+      FALLBACK_NODE_RADIUS_PX + metrics.treble * 3.4 + (metrics.playing ? FALLBACK_PLAYING_NODE_RADIUS_BOOST_PX : 0),
+      0,
+      Math.PI * 2,
+    );
     context.fill();
   }
   context.globalAlpha = 1;
