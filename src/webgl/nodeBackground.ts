@@ -40,11 +40,11 @@ const ACTIVE_NODE_SIZE_BOOST = 0.014;
 const PULSE_NODE_SIZE_BOOST = 0.02;
 const ACTIVE_OPACITY_BOOST = 0.072;
 const PULSE_OPACITY_BOOST = 0.095;
-const BASE_DRIFT_SPEED = 0.0023;
+const BASE_DRIFT_SPEED = 0.00035;
 const AUDIO_DRIFT_GAIN = 0.0078;
 const FALLBACK_CONNECTION_DISTANCE_PX = 132;
 const FALLBACK_NODE_RADIUS_PX = 1.8;
-const FALLBACK_BASE_DRIFT_SPEED = 0.31;
+const FALLBACK_BASE_DRIFT_SPEED = 0.06;
 const FALLBACK_ACTIVE_NODE_RADIUS_BOOST_PX = 0.72;
 const FALLBACK_PULSE_NODE_RADIUS_BOOST_PX = 1.08;
 const MIN_RENDER_SIZE_PX = 1;
@@ -159,8 +159,8 @@ function createThreeNodeField(canvas: HTMLCanvasElement): AudioNodeField {
       + metrics.treble * NODE_SIZE_GAIN
       + metrics.activity * ACTIVE_NODE_SIZE_BOOST
       + metrics.pulse * PULSE_NODE_SIZE_BOOST;
-    pointMaterial.opacity = clamp(0.68 + metrics.treble * 0.1 + metrics.activity * (ACTIVE_OPACITY_BOOST + 0.08) + metrics.pulse * PULSE_OPACITY_BOOST, 0, 0.94);
-    lineMaterial.opacity = clamp(0.11 + metrics.mid * 0.34 + metrics.activity * (ACTIVE_OPACITY_BOOST + 0.04) + metrics.pulse * PULSE_OPACITY_BOOST, 0, 0.56);
+    pointMaterial.opacity = clamp(0.56 + metrics.treble * 0.1 + metrics.activity * (ACTIVE_OPACITY_BOOST + 0.2) + metrics.pulse * PULSE_OPACITY_BOOST, 0, 0.94);
+    lineMaterial.opacity = clamp(0.075 + metrics.mid * 0.34 + metrics.activity * (ACTIVE_OPACITY_BOOST + 0.075) + metrics.pulse * PULSE_OPACITY_BOOST, 0, 0.56);
     writeConnections(nodes, linePositions, lineGeometry, CONNECTION_DISTANCE + metrics.bass * 0.72 + metrics.pulse * 0.32);
     points.rotation.y += 0.0007 + metrics.waveform * 0.0016 + metrics.pulse * 0.00135;
     lines.rotation.copy(points.rotation);
@@ -297,9 +297,12 @@ function createFallbackNodes(): FallbackNode[] {
 }
 
 function updateNodes(nodes: NodeState[], metrics: AudioMetrics): void {
-  const speed = BASE_DRIFT_SPEED + metrics.bass * AUDIO_DRIFT_GAIN + metrics.activity * 0.006 + metrics.pulse * 0.0032;
+  const speed = BASE_DRIFT_SPEED + metrics.bass * AUDIO_DRIFT_GAIN + metrics.activity * 0.0086 + metrics.pulse * 0.0032;
+  const depthSpeed = speed * clamp(0.18 + metrics.activity * 2.4 + metrics.pulse * 0.4, 0.18, 1);
   for (const node of nodes) {
-    node.position.addScaledVector(node.velocity, speed);
+    node.position.x += node.velocity.x * speed;
+    node.position.y += node.velocity.y * speed;
+    node.position.z += node.velocity.z * depthSpeed;
     wrapAxis(node.position, "x", 6.2);
     wrapAxis(node.position, "y", 4.1);
     wrapAxis(node.position, "z", SCENE_DEPTH);
@@ -361,7 +364,7 @@ function writeConnections(
 }
 
 function updateFallbackNodes(nodes: FallbackNode[], width: number, height: number, metrics: AudioMetrics): void {
-  const speed = FALLBACK_BASE_DRIFT_SPEED + metrics.bass * 1.35 + metrics.activity * 0.56 + metrics.pulse * 0.62;
+  const speed = FALLBACK_BASE_DRIFT_SPEED + metrics.bass * 1.35 + metrics.activity * 0.95 + metrics.pulse * 0.62;
   for (const node of nodes) {
     node.x += (node.vx * speed) / Math.max(1, width);
     node.y += (node.vy * speed) / Math.max(1, height);
@@ -386,7 +389,7 @@ function drawFallbackConnections(
   const height = context.canvas.clientHeight || window.innerHeight;
   const distanceLimit = FALLBACK_CONNECTION_DISTANCE_PX + metrics.mid * 52 + metrics.pulse * 34;
   context.strokeStyle = COLORS.connection;
-  context.globalAlpha = clamp(0.1 + metrics.mid * 0.34 + metrics.activity * 0.11 + metrics.pulse * 0.1, 0, 0.5);
+  context.globalAlpha = clamp(0.07 + metrics.mid * 0.34 + metrics.activity * 0.14 + metrics.pulse * 0.1, 0, 0.5);
   context.lineWidth = 1;
 
   for (let firstIndex = 0; firstIndex < nodes.length; firstIndex += 1) {
@@ -420,7 +423,7 @@ function drawFallbackNodes(
   const width = context.canvas.clientWidth || window.innerWidth;
   const height = context.canvas.clientHeight || window.innerHeight;
   context.fillStyle = COLORS.node;
-  context.globalAlpha = clamp(0.68 + metrics.treble * 0.1 + metrics.activity * 0.16 + metrics.pulse * 0.09, 0, 0.96);
+  context.globalAlpha = clamp(0.56 + metrics.treble * 0.1 + metrics.activity * 0.28 + metrics.pulse * 0.09, 0, 0.96);
 
   for (const node of nodes) {
     context.beginPath();
