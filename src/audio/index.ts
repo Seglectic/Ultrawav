@@ -8,11 +8,11 @@ import type { DetectedPayload, EmbedResult, ExportArtifact, HighlightRegion, Pay
 export { MAX_FILE_PAYLOAD_BYTES };
 export type { DetectedPayload, EmbedResult, ExportArtifact, HighlightRegion, PayloadInput };
 
-const TAIL_EMBED_GAP_SECONDS = 0.5;
+const EMBED_START_SECONDS = 0.5;
 const FRAME_GAP_SECONDS = 0.25;
-const EMBED_SIGNAL_GAIN = 0.18;
+const EMBED_SIGNAL_GAIN = 0.22;
 const EMBED_SIGNAL_FADE_SECONDS = 0.01;
-const CARRIER_LOW_PASS_HZ = 14_000;
+const CARRIER_LOW_PASS_HZ = 17_000;
 const DETECTION_START_SECONDS = 90;
 const DETECTION_TAIL_SECONDS = 600;
 const DETECTION_WINDOW_SECONDS = 24;
@@ -81,18 +81,20 @@ export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput):
   const fadeSamples = Math.round(EMBED_SIGNAL_FADE_SECONDS * carrier.sampleRate);
   const encodedFrames = await Promise.all(frames.map(async (frame) => fadeSignalEdges(await encodeGgWave(frame, carrier.sampleRate), fadeSamples)));
   const frameGapSamples = Math.round(FRAME_GAP_SECONDS * carrier.sampleRate);
-  const embedStartSeconds = carrier.duration + TAIL_EMBED_GAP_SECONDS;
-  let cursor = Math.round(embedStartSeconds * carrier.sampleRate);
-
   const embeddedLength = encodedFrames.reduce(
     (length, frame) => length + frame.length + frameGapSamples,
     0,
   );
-  const outputLength = Math.max(carrier.length, cursor + embeddedLength);
+  let cursor = Math.round(EMBED_START_SECONDS * carrier.sampleRate);
+
+  if (cursor + embeddedLength > carrier.length) {
+    throw new Error(`Payload needs ${formatSeconds(embeddedLength / carrier.sampleRate)} of carrier after ${formatSeconds(EMBED_START_SECONDS)}.`);
+  }
+
   const filteredCarrier = await lowPassAudioBuffer(carrier, CARRIER_LOW_PASS_HZ);
-  const output = cloneAudioBuffer(filteredCarrier, outputLength);
+  const output = cloneAudioBuffer(filteredCarrier);
   const dataBuffer = new AudioBuffer({
-    length: outputLength,
+    length: output.length,
     numberOfChannels: carrier.numberOfChannels,
     sampleRate: carrier.sampleRate,
   });
@@ -148,6 +150,8 @@ export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput):
     embedded,
   };
 };
+
+const formatSeconds = (seconds: number): string => `${seconds.toFixed(1)}s`;
 
 const fadeSignalEdges = (signal: Float32Array, fadeSamples: number): Float32Array => {
   if (fadeSamples <= 1) {

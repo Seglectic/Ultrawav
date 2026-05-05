@@ -147,6 +147,8 @@ const nodeField = createAudioNodeField(nodeCanvas);
 const frequencyData = new Uint8Array(256);
 const timeData = new Uint8Array(256);
 
+spectrumCanvas.tabIndex = 0;
+
 wireEvents();
 render();
 animate();
@@ -188,6 +190,15 @@ function wireEvents() {
   embedButton.addEventListener("click", () => void embedCurrentPayload());
   exportButton.addEventListener("click", () => void exportCurrentAudio());
   downloadPayloadButton.addEventListener("click", downloadDetectedPayload);
+  spectrumCanvas.addEventListener("pointerdown", (event) => {
+    void seekVisualizer(event);
+  });
+  spectrumCanvas.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      void seekRelative(event.key === "ArrowLeft" ? -5 : 5);
+    }
+  });
 
   textInput.addEventListener("input", () => {
     if (state.payloadMode === "text") {
@@ -365,6 +376,10 @@ async function togglePlay() {
     return;
   }
 
+  await startPlayback();
+}
+
+async function startPlayback() {
   const buffer = state.augmented?.buffer ?? state.carrierBuffer;
 
   if (!buffer) {
@@ -373,6 +388,8 @@ async function togglePlay() {
 
   const playback = getPlayback();
   const source = playback.context.createBufferSource();
+  const offset = Math.min(playback.offset, Math.max(0, buffer.duration - 0.001));
+
   source.buffer = buffer;
   source.connect(playback.analyser);
   playback.analyser.connect(playback.context.destination);
@@ -390,9 +407,10 @@ async function togglePlay() {
   }
 
   playback.source = source;
-  playback.startedAt = playback.context.currentTime - playback.offset;
+  playback.offset = offset;
+  playback.startedAt = playback.context.currentTime - offset;
   playback.playing = true;
-  source.start(0, playback.offset);
+  source.start(0, offset);
   render();
 }
 
@@ -404,9 +422,7 @@ function pausePlayback() {
   }
 
   playback.offset = playback.context.currentTime - playback.startedAt;
-  playback.source.stop();
-  playback.source.disconnect();
-  playback.source = null;
+  stopSource(playback);
   playback.playing = false;
   render();
 }
@@ -418,15 +434,69 @@ function stopPlayback() {
     return;
   }
 
-  if (playback.source) {
-    playback.source.stop();
-    playback.source.disconnect();
-  }
-
-  playback.source = null;
+  stopSource(playback);
   playback.offset = 0;
   playback.playing = false;
   render();
+}
+
+function stopSource(playback: PlaybackState) {
+  const source = playback.source;
+  playback.source = null;
+
+  if (!source) {
+    return;
+  }
+
+  try {
+    source.stop();
+  } catch {
+    // Already stopped.
+  }
+  source.disconnect();
+}
+
+async function seekVisualizer(event: PointerEvent) {
+  const buffer = state.augmented?.buffer ?? state.carrierBuffer;
+  if (!buffer) {
+    return;
+  }
+
+  const rect = spectrumCanvas.getBoundingClientRect();
+  const edgePadding = 28;
+  const left = Math.min(edgePadding, rect.width / 2);
+  const right = Math.max(left + 1, rect.width - edgePadding);
+  const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left - left) / (right - left)));
+  await seekPlayback(ratio * buffer.duration);
+}
+
+async function seekRelative(deltaSeconds: number) {
+  const buffer = state.augmented?.buffer ?? state.carrierBuffer;
+  if (!buffer) {
+    return;
+  }
+
+  await seekPlayback(Math.max(0, Math.min(buffer.duration, getPlayheadTime() + deltaSeconds)));
+}
+
+async function seekPlayback(time: number) {
+  const buffer = state.augmented?.buffer ?? state.carrierBuffer;
+  if (!buffer) {
+    return;
+  }
+
+  const playback = getPlayback();
+  const wasPlaying = playback.playing;
+
+  stopSource(playback);
+  playback.offset = Math.max(0, Math.min(time, buffer.duration));
+  playback.playing = false;
+
+  if (wasPlaying) {
+    await startPlayback();
+  } else {
+    render();
+  }
 }
 
 function getPlayback(): PlaybackState {
@@ -543,7 +613,7 @@ function getPlayheadTime() {
   const playback = state.playback;
 
   if (!playback) {
-    return null;
+    return 0;
   }
 
   return playback.playing ? playback.context.currentTime - playback.startedAt : playback.offset;

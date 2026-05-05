@@ -8,18 +8,25 @@ declare module "@vpalmisano/ggwave" {
     sampleRate: number;
     samplesPerFrame: number;
     soundMarkerThreshold: number;
-    sampleFormatInp: object;
-    sampleFormatOut: object;
+    sampleFormatInp: GgWaveSampleFormat;
+    sampleFormatOut: GgWaveSampleFormat;
     operatingMode: number;
   };
 
+  export type GgWaveSampleFormat = object;
+
   export type GgWaveModule = {
     GGWAVE_OPERATING_MODE_USE_DSS: number;
+    SampleFormat: {
+      GGWAVE_SAMPLE_FORMAT_F32: GgWaveSampleFormat;
+    };
     ProtocolId: {
       GGWAVE_PROTOCOL_ULTRASOUND_FAST: GgWaveProtocol;
       GGWAVE_PROTOCOL_ULTRASOUND_NORMAL: GgWaveProtocol;
       GGWAVE_PROTOCOL_AUDIBLE_FAST: GgWaveProtocol;
     };
+    rxProtocolSetFreqStart(protocol: GgWaveProtocol, freqStart: number): void;
+    txProtocolSetFreqStart(protocol: GgWaveProtocol, freqStart: number): void;
     getDefaultParameters(): GgWaveParameters;
     init(parameters: GgWaveParameters): number;
     free(instance: number): void;
