@@ -498,7 +498,39 @@ export function App() {
       });
       const artifact = chooseDownloadArtifact(exportedArtifacts);
       if (!artifact.verified) {
-        throw new Error("Export verification failed; payload was not downloaded.");
+        console.warn("Export verification failed; payload was not downloaded.", {
+          reason: "Decoded export did not contain a recoverable GGWave payload.",
+          carrier: carrierFileRef.current
+            ? {
+                name: carrierFileRef.current.name,
+                size: carrierFileRef.current.size,
+                type: carrierFileRef.current.type,
+              }
+            : null,
+          audio: {
+            duration: buffer.duration,
+            sampleRate: buffer.sampleRate,
+            channels: buffer.numberOfChannels,
+          },
+          payload: currentAugmented
+            ? {
+                kind: currentAugmented.payload.kind,
+                fileName: currentAugmented.payload.fileName,
+                mimeType: currentAugmented.payload.mimeType,
+                size: currentAugmented.payload.size,
+              }
+            : null,
+          regions,
+          artifacts: exportedArtifacts.map((exportedArtifact) => ({
+            kind: exportedArtifact.kind,
+            fileName: exportedArtifact.fileName,
+            mimeType: exportedArtifact.mimeType,
+            size: exportedArtifact.blob.size,
+            verified: exportedArtifact.verified,
+            message: exportedArtifact.message,
+          })),
+        });
+        throw new Error("Export verification failed; see console.");
       }
       downloadArtifact(artifact);
       setActionNotice("Export verified");
