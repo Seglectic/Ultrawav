@@ -19,14 +19,17 @@ const HOP_SIZE = 1024;
 const BIN_COUNT = 96;
 const MIN_FREQUENCY = 35;
 const MAX_FREQUENCY = 22_000;
-const WATERFALL_DEPTH = 5.8;
-const WATERFALL_WIDTH = 10.5;
+const WATERFALL_DEPTH = 10;
+const WATERFALL_WIDTH = 10;
 const WATERFALL_BASE_Y = -2.16;
-const WATERFALL_AMPLITUDE_HEIGHT = 3.75;
+const WATERFALL_AMPLITUDE_HEIGHT = 6.9;
 const LIVE_BIN_COUNT = 72;
 const LIVE_HISTORY_STEPS = 56;
+const DATA_TRAIL_STEPS = 48;
 const LIVE_FRAME_INTERVAL = 1 / 20;
 const PROFILE_FRAME_INTERVAL = 1 / 18;
+const DATA_TRAIL_FRAME_INTERVAL = 1 / 18;
+const DATA_TRAIL_MIN_MAGNITUDE = 0.08;
 const CARRIER_COLOR = new Color("#54e7ff");
 const DATA_COLOR = new Color("#ff6b9d");
 const LIVE_COLOR = new Color("#54e7ff");
@@ -50,7 +53,7 @@ export function FourierVisualizer(props: FourierVisualizerProps) {
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <Canvas
-        camera={{ position: [6.8, 4.6, 8.8], fov: 46, near: 0.1, far: 80 }}
+        camera={{ position: [7.7, 5.3, 11.2], fov: 50, near: 0.1, far: 80 }}
         dpr={[1, 1.25]}
         gl={{ antialias: false, alpha: true, powerPreference: "high-performance" }}
       >
@@ -63,10 +66,10 @@ export function FourierVisualizer(props: FourierVisualizerProps) {
           enablePan={false}
           enableDamping={false}
           minDistance={5.5}
-          maxDistance={13}
+          maxDistance={18}
           minPolarAngle={0.75}
           maxPolarAngle={1.36}
-          target={[0, -0.65, 0] as any}
+          target={[0, -1.05, 0.35] as any}
         />
         <EffectComposer multisampling={0}>
           <SMAA />
@@ -87,7 +90,7 @@ function FourierScene(props: FourierVisualizerProps) {
       <GridPlane />
       <LiveWaterfall frequencyData={props.liveFrequencyData} sampleRate={props.liveSampleRate} />
       {carrierLayer ? <SpectrumProfile layer={carrierLayer} color={CARRIER_COLOR} opacity={0.5} playheadTime={props.playheadTime ?? 0} z={-2.48} size={0.048} gain={0.9} /> : null}
-      {dataLayer ? <SpectrumProfile layer={dataLayer} color={DATA_COLOR} opacity={0.88} playheadTime={props.playheadTime ?? 0} z={-2.45} size={0.088} gain={1.28} /> : null}
+      {dataLayer ? <SpectrogramTrail layer={dataLayer} color={DATA_COLOR} opacity={0.84} playheadTime={props.playheadTime ?? 0} size={0.045} gain={1.1} /> : null}
     </group>
   );
 }
@@ -324,6 +327,130 @@ function writeProfileGeometry(
     }
   }
 
+  geometry.attributes.position.needsUpdate = true;
+  if (geometry.attributes.color) {
+    geometry.attributes.color.needsUpdate = true;
+  }
+}
+
+function SpectrogramTrail(props: {
+  layer: SpectrogramLayer;
+  color: Color;
+  opacity: number;
+  playheadTime: number;
+  size: number;
+  gain: number;
+}) {
+  const historySteps = Math.min(DATA_TRAIL_STEPS, props.layer.timeSteps);
+  const playheadTimeRef = useRef(props.playheadTime);
+  const lastTimeIndexRef = useRef(-1);
+  const lastWriteRef = useRef(0);
+  const geometry = useMemo(() => createTrailGeometry(props.layer.binCount, historySteps), [historySteps, props.layer]);
+  const material = useMemo(
+    () =>
+      new PointsMaterial({
+        size: props.size,
+        vertexColors: true,
+        transparent: true,
+        opacity: props.opacity,
+        depthWrite: false,
+        blending: AdditiveBlending,
+      }),
+    [props.opacity, props.size],
+  );
+
+  useEffect(() => {
+    playheadTimeRef.current = props.playheadTime;
+  }, [props.playheadTime]);
+
+  useEffect(() => {
+    lastTimeIndexRef.current = -1;
+    writeTrailGeometry(
+      geometry,
+      props.layer,
+      props.color,
+      profileTimeIndex(props.layer, playheadTimeRef.current),
+      historySteps,
+      props.gain,
+    );
+  }, [geometry, historySteps, props.color, props.gain, props.layer]);
+
+  useFrame((state) => {
+    if (state.clock.elapsedTime - lastWriteRef.current < DATA_TRAIL_FRAME_INTERVAL) {
+      return;
+    }
+
+    const timeIndex = profileTimeIndex(props.layer, playheadTimeRef.current);
+    if (timeIndex === lastTimeIndexRef.current) {
+      return;
+    }
+
+    lastWriteRef.current = state.clock.elapsedTime;
+    lastTimeIndexRef.current = timeIndex;
+    writeTrailGeometry(geometry, props.layer, props.color, timeIndex, historySteps, props.gain);
+  });
+
+  useEffect(() => {
+    return () => {
+      geometry.dispose();
+      material.dispose();
+    };
+  }, [geometry, material]);
+
+  return <points frustumCulled={false} args={[geometry, material]} />;
+}
+
+function createTrailGeometry(binCount: number, historySteps: number): BufferGeometry {
+  const geometry = new BufferGeometry();
+  const pointCount = binCount * historySteps;
+  geometry.setAttribute("position", new BufferAttribute(new Float32Array(pointCount * 3), 3));
+  geometry.setAttribute("color", new BufferAttribute(new Float32Array(pointCount * 3), 3));
+  geometry.setDrawRange(0, pointCount);
+  return geometry;
+}
+
+function writeTrailGeometry(
+  geometry: BufferGeometry,
+  layer: SpectrogramLayer,
+  color: Color,
+  timeIndex: number,
+  historySteps: number,
+  gain: number,
+): void {
+  const positions = geometry.attributes.position.array as Float32Array;
+  const colors = geometry.attributes.color?.array as Float32Array | undefined;
+  let outputIndex = 0;
+
+  for (let age = 0; age < historySteps; age += 1) {
+    const sourceTimeIndex = Math.max(0, timeIndex - age);
+    const ageRatio = age / Math.max(1, historySteps - 1);
+    const z = -WATERFALL_DEPTH / 2 + ageRatio * WATERFALL_DEPTH;
+    const fade = 1 - ageRatio * 0.72;
+
+    for (let binIndex = 0; binIndex < layer.binCount; binIndex += 1) {
+      const frequencyRatio = binIndex / Math.max(1, layer.binCount - 1);
+      const rawMagnitude = layer.magnitudes[sourceTimeIndex * layer.binCount + binIndex] ?? 0;
+      if (rawMagnitude * gain < DATA_TRAIL_MIN_MAGNITUDE) {
+        continue;
+      }
+
+      const magnitude = Math.min(1, rawMagnitude * gain) * fade;
+      positions[outputIndex * 3] = (frequencyRatio - 0.5) * WATERFALL_WIDTH;
+      positions[outputIndex * 3 + 1] = WATERFALL_BASE_Y + magnitude * WATERFALL_AMPLITUDE_HEIGHT;
+      positions[outputIndex * 3 + 2] = z;
+
+      if (colors) {
+        const intensity = 0.14 + magnitude * 1.27;
+        colors[outputIndex * 3] = color.r * intensity;
+        colors[outputIndex * 3 + 1] = color.g * intensity;
+        colors[outputIndex * 3 + 2] = color.b * intensity;
+      }
+
+      outputIndex += 1;
+    }
+  }
+
+  geometry.setDrawRange(0, outputIndex);
   geometry.attributes.position.needsUpdate = true;
   if (geometry.attributes.color) {
     geometry.attributes.color.needsUpdate = true;
