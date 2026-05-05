@@ -801,6 +801,12 @@ export function App() {
                 liveSampleRate={playbackRef.current?.context.sampleRate ?? carrierBuffer?.sampleRate ?? null}
               />
             </div>
+            <LiveWaveform
+              timeData={playbackSnapshot.playing ? timeDataRef.current : null}
+              data={visualizerData}
+              playing={playbackSnapshot.playing}
+              getPlayheadTime={getPlayheadTime}
+            />
           </section>
         </section>
       </main>
@@ -927,6 +933,69 @@ function TransportWaveform(props: {
   );
 }
 
+function LiveWaveform(props: {
+  timeData: Uint8Array | null;
+  data: AudioBuffer | null;
+  playing: boolean;
+  getPlayheadTime: () => number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const propsRef = useRef(props);
+  propsRef.current = props;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return undefined;
+    }
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return undefined;
+    }
+
+    let frameId = 0;
+    let lastDraw = 0;
+
+    const draw = (time: number) => {
+      const drawInterval = propsRef.current.playing ? 33 : 250;
+      if (time - lastDraw >= drawInterval) {
+        lastDraw = time;
+        const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+        const width = Math.max(1, canvas.clientWidth);
+        const height = Math.max(1, canvas.clientHeight);
+        const nextWidth = Math.round(width * pixelRatio);
+        const nextHeight = Math.round(height * pixelRatio);
+
+        if (canvas.width !== nextWidth || canvas.height !== nextHeight) {
+          canvas.width = nextWidth;
+          canvas.height = nextHeight;
+        }
+
+        context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+        drawLiveWaveform(context, width, height, propsRef.current);
+      }
+
+      frameId = requestAnimationFrame(draw);
+    };
+
+    frameId = requestAnimationFrame(draw);
+
+    return () => {
+      cancelAnimationFrame(frameId);
+    };
+  }, []);
+
+  return (
+    <canvas
+      className="live-waveform"
+      ref={canvasRef}
+      aria-label="Live audio and data waveform"
+      role="img"
+    />
+  );
+}
+
 function drawTransportWaveform(
   context: CanvasRenderingContext2D,
   width: number,
@@ -974,6 +1043,213 @@ function drawTransportWaveform(
   const x = Math.min(1, Math.max(0, playheadTime / duration)) * width;
   context.fillStyle = "rgba(216, 255, 79, 0.95)";
   context.fillRect(x - 1.5, 0, 3, height);
+}
+
+function drawLiveWaveform(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  props: {
+    timeData: Uint8Array | null;
+    data: AudioBuffer | null;
+    playing: boolean;
+    getPlayheadTime: () => number;
+  },
+): void {
+  context.clearRect(0, 0, width, height);
+
+  const laneGap = 4;
+  const padX = 8;
+  const padY = 4;
+  const laneHeight = Math.max(1, (height - padY * 2 - laneGap) / 2);
+  const topLane = padY;
+  const bottomLane = topLane + laneHeight + laneGap;
+  const drawWidth = Math.max(1, width - padX * 2);
+
+  context.fillStyle = "rgba(2, 5, 10, 0.48)";
+  context.fillRect(0, 0, width, height);
+
+  context.strokeStyle = "rgba(238, 244, 221, 0.1)";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(0, bottomLane - laneGap / 2);
+  context.lineTo(width, bottomLane - laneGap / 2);
+  context.stroke();
+
+  drawLiveByteWaveform(context, props.timeData, props.playing, padX, topLane, drawWidth, laneHeight, "#54e7ff");
+  drawLiveBufferWindow(
+    context,
+    props.data,
+    props.playing ? props.getPlayheadTime() : 0,
+    props.playing,
+    padX,
+    bottomLane,
+    drawWidth,
+    laneHeight,
+    "#ff6b9d",
+  );
+}
+
+function drawLiveByteWaveform(
+  context: CanvasRenderingContext2D,
+  timeData: Uint8Array | null,
+  active: boolean,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  color: string,
+): void {
+  const centerY = top + height / 2;
+  const scaleY = height * 0.42;
+
+  if (!active || !timeData || timeData.length === 0) {
+    drawLiveBaseline(context, left, centerY, width, color);
+    return;
+  }
+
+  let maxAbs = 0;
+  for (let index = 0; index < timeData.length; index += 1) {
+    maxAbs = Math.max(maxAbs, Math.abs((timeData[index] - 128) / 128));
+  }
+
+  if (maxAbs < 0.004) {
+    drawLiveBaseline(context, left, centerY, width, color);
+    return;
+  }
+
+  const gain = Math.min(5, 0.9 / maxAbs);
+  const pixelCount = Math.max(2, Math.floor(width));
+
+  context.save();
+  context.strokeStyle = color;
+  context.shadowColor = color;
+  context.shadowBlur = 6;
+  context.globalAlpha = 0.9;
+  context.lineWidth = 1.15;
+  context.beginPath();
+
+  for (let x = 0; x < pixelCount; x += 1) {
+    const ratio = x / Math.max(1, pixelCount - 1);
+    const index = Math.min(timeData.length - 1, Math.floor(ratio * timeData.length));
+    const normalized = ((timeData[index] - 128) / 128) * gain;
+    const y = centerY - Math.max(-1, Math.min(1, normalized)) * scaleY;
+
+    if (x === 0) {
+      context.moveTo(left + x, y);
+    } else {
+      context.lineTo(left + x, y);
+    }
+  }
+
+  context.stroke();
+  context.restore();
+}
+
+function drawLiveBufferWindow(
+  context: CanvasRenderingContext2D,
+  buffer: AudioBuffer | null,
+  playheadTime: number,
+  active: boolean,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  color: string,
+): void {
+  const centerY = top + height / 2;
+  const scaleY = height * 0.42;
+
+  if (!active || !buffer) {
+    drawLiveBaseline(context, left, centerY, width, color);
+    return;
+  }
+
+  const windowSamples = Math.max(Math.floor(buffer.sampleRate * 0.09), Math.floor(width * 3));
+  const centerSample = Math.round(playheadTime * buffer.sampleRate);
+  const startSample = Math.max(0, Math.min(buffer.length - windowSamples, centerSample - Math.floor(windowSamples / 2)));
+  const pixelCount = Math.max(2, Math.floor(width));
+  const channels = Array.from({ length: buffer.numberOfChannels }, (_, channel) => buffer.getChannelData(channel));
+  const mins = new Float32Array(pixelCount);
+  const maxes = new Float32Array(pixelCount);
+  let maxAbs = 0;
+
+  for (let x = 0; x < pixelCount; x += 1) {
+    const bucketStart = startSample + Math.floor((x / pixelCount) * windowSamples);
+    const bucketEnd = Math.min(buffer.length, startSample + Math.floor(((x + 1) / pixelCount) * windowSamples));
+    let minValue = 0;
+    let maxValue = 0;
+
+    for (let sampleIndex = bucketStart; sampleIndex < bucketEnd; sampleIndex += 1) {
+      let sum = 0;
+      for (let channel = 0; channel < channels.length; channel += 1) {
+        sum += channels[channel][sampleIndex] ?? 0;
+      }
+
+      const value = sum / Math.max(1, channels.length);
+      minValue = Math.min(minValue, value);
+      maxValue = Math.max(maxValue, value);
+    }
+
+    mins[x] = minValue;
+    maxes[x] = maxValue;
+    maxAbs = Math.max(maxAbs, Math.abs(minValue), Math.abs(maxValue));
+  }
+
+  if (maxAbs < 0.003) {
+    drawLiveBaseline(context, left, centerY, width, color);
+    return;
+  }
+
+  const gain = Math.min(8, 0.9 / maxAbs);
+
+  context.save();
+  context.strokeStyle = color;
+  context.fillStyle = color;
+  context.shadowColor = color;
+  context.shadowBlur = 7;
+  context.globalAlpha = 0.82;
+  context.lineWidth = 1;
+  context.beginPath();
+
+  for (let x = 0; x < pixelCount; x += 1) {
+    const y = centerY - Math.max(-1, Math.min(1, maxes[x] * gain)) * scaleY;
+    if (x === 0) {
+      context.moveTo(left + x, y);
+    } else {
+      context.lineTo(left + x, y);
+    }
+  }
+
+  for (let x = pixelCount - 1; x >= 0; x -= 1) {
+    const y = centerY - Math.max(-1, Math.min(1, mins[x] * gain)) * scaleY;
+    context.lineTo(left + x, y);
+  }
+
+  context.closePath();
+  context.globalAlpha = 0.12;
+  context.fill();
+  context.globalAlpha = 0.84;
+  context.stroke();
+  context.restore();
+}
+
+function drawLiveBaseline(
+  context: CanvasRenderingContext2D,
+  left: number,
+  centerY: number,
+  width: number,
+  color: string,
+): void {
+  context.save();
+  context.strokeStyle = color;
+  context.globalAlpha = 0.18;
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(left, centerY);
+  context.lineTo(left + width, centerY);
+  context.stroke();
+  context.restore();
 }
 
 function drawWaveformFill(
