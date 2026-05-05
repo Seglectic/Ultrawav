@@ -1,4 +1,4 @@
-# Stepgrid Agent Notes
+# Ultrasonic Encoder Agent Notes
 
 ## Project
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   MAX_FILE_PAYLOAD_BYTES,
@@ -16,7 +16,7 @@ import {
   type HighlightRegion,
   type PayloadInput,
 } from "./audio";
-import { FourierVisualizer, type FourierMode } from "./visualizer";
+import { FourierVisualizer } from "./visualizer";
 import { createAudioNodeField, type AudioNodeField } from "./webgl";
 
 type PayloadMode = "text" | "file";
@@ -39,6 +39,7 @@ const INITIAL_PLAYBACK: PlaybackSnapshot = {
   playing: false,
   offset: 0,
 };
+const TEXT_APPLY_DEBOUNCE_MS = 650;
 
 export function App() {
   const [carrierFile, setCarrierFile] = useState<File | null>(null);
@@ -48,12 +49,16 @@ export function App() {
   const [detectedDataBuffer, setDetectedDataBuffer] = useState<AudioBuffer | null>(null);
   const [payloadMode, setPayloadMode] = useState<PayloadMode>("text");
   const [filePayload, setFilePayload] = useState<PayloadInput | null>(null);
-  const [artifacts, setArtifacts] = useState<ExportArtifact[]>([]);
-  const [status, setStatus] = useState("Drop an audio file");
+  const [augmentedKey, setAugmentedKey] = useState("");
+  const [payloadDirty, setPayloadDirty] = useState(false);
+  const [carrierNotice, setCarrierNotice] = useState("");
+  const [payloadNotice, setPayloadNotice] = useState("");
+  const [actionNotice, setActionNotice] = useState("");
+  const [isPreparing, setIsPreparing] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [textPayload, setTextPayload] = useState("");
   const [playbackSnapshot, setPlaybackSnapshot] = useState<PlaybackSnapshot>(INITIAL_PLAYBACK);
   const [playheadTime, setPlayheadTime] = useState(0);
-  const [visualizerMode, setVisualizerMode] = useState<FourierMode>("hybrid");
 
   const nodeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
@@ -63,12 +68,16 @@ export function App() {
   const carrierBufferRef = useRef<AudioBuffer | null>(null);
   const carrierFileRef = useRef<File | null>(null);
   const augmentedRef = useRef<EmbedResult | null>(null);
+  const augmentedKeyRef = useRef("");
   const detectedRef = useRef<DetectedPayload | null>(null);
   const detectedDataBufferRef = useRef<AudioBuffer | null>(null);
   const textPayloadRef = useRef("");
   const payloadModeRef = useRef<PayloadMode>("text");
   const filePayloadRef = useRef<PayloadInput | null>(null);
+  const payloadDirtyRef = useRef(false);
   const animationFrameRef = useRef<number | null>(null);
+  const embedJobRef = useRef(0);
+  const playheadUpdateRef = useRef(0);
   const frequencyDataRef = useRef(new Uint8Array(256));
   const timeDataRef = useRef(new Uint8Array(256));
 
@@ -83,6 +92,10 @@ export function App() {
   useEffect(() => {
     augmentedRef.current = augmented;
   }, [augmented]);
+
+  useEffect(() => {
+    augmentedKeyRef.current = augmentedKey;
+  }, [augmentedKey]);
 
   useEffect(() => {
     detectedRef.current = detected;
@@ -104,6 +117,10 @@ export function App() {
     filePayloadRef.current = filePayload;
   }, [filePayload]);
 
+  useEffect(() => {
+    payloadDirtyRef.current = payloadDirty;
+  }, [payloadDirty]);
+
   const syncPlaybackSnapshot = useCallback(() => {
     const playback = playbackRef.current;
     setPlaybackSnapshot({
@@ -112,7 +129,17 @@ export function App() {
     });
   }, []);
 
-  const getPlayableBuffer = useCallback(() => augmentedRef.current?.buffer ?? carrierBufferRef.current, []);
+  const getActiveAugmented = useCallback(() => {
+    const currentAugmented = augmentedRef.current;
+    return currentAugmented?.payload.kind === payloadModeRef.current ? currentAugmented : null;
+  }, []);
+
+  const getActiveDetected = useCallback(() => {
+    const currentDetected = detectedRef.current;
+    return currentDetected?.kind === payloadModeRef.current ? currentDetected : null;
+  }, []);
+
+  const getPlayableBuffer = useCallback(() => getActiveAugmented()?.buffer ?? carrierBufferRef.current, [getActiveAugmented]);
 
   const getPlayheadTime = useCallback(() => {
     const playback = playbackRef.current;
@@ -124,7 +151,12 @@ export function App() {
     return playback.playing ? playback.context.currentTime - playback.startedAt : playback.offset;
   }, []);
 
-  const updatePlayhead = useCallback(() => {
+  const updatePlayhead = useCallback((force = false) => {
+    const now = performance.now();
+    if (!force && now - playheadUpdateRef.current < 100) {
+      return;
+    }
+    playheadUpdateRef.current = now;
     setPlayheadTime(getPlayheadTime());
   }, [getPlayheadTime]);
 
@@ -180,11 +212,101 @@ export function App() {
     playback.offset = 0;
     playback.playing = false;
     syncPlaybackSnapshot();
-    updatePlayhead();
+    updatePlayhead(true);
   }, [stopSource, syncPlaybackSnapshot, updatePlayhead]);
 
+  const getPayloadInput = useCallback((options: { require?: boolean } = {}): PayloadInput | null => {
+    if (payloadModeRef.current === "file") {
+      if (!filePayloadRef.current) {
+        if (options.require) {
+          setPayloadNotice("Drop file here or click to select");
+        }
+        return null;
+      }
+
+      return filePayloadRef.current;
+    }
+
+    const text = textPayloadRef.current.trim();
+
+    if (!text) {
+      if (options.require) {
+        setPayloadNotice("Enter text to encode");
+      }
+      return null;
+    }
+
+    return makeTextPayload(text);
+  }, []);
+
+  const applyPayload = useCallback(async (payload: PayloadInput): Promise<EmbedResult | null> => {
+    const carrier = carrierBufferRef.current;
+
+    if (!carrier) {
+      setCarrierNotice("Drop audio here or click to select");
+      return null;
+    }
+
+    const key = makeEmbedKey(carrierFileRef.current, carrier, payload);
+    const currentAugmented = augmentedRef.current;
+
+    if (currentAugmented && augmentedKeyRef.current === key) {
+      return currentAugmented;
+    }
+
+    const jobId = embedJobRef.current + 1;
+    embedJobRef.current = jobId;
+    setIsPreparing(true);
+    setActionNotice("Applying payload...");
+    stopPlayback();
+
+    try {
+      const result = await embedPayload(carrier, payload);
+
+      if (embedJobRef.current !== jobId) {
+        return null;
+      }
+
+      setAugmented(result);
+      setAugmentedKey(key);
+      setDetected(result.embedded);
+      setDetectedDataBuffer(null);
+      setPayloadDirty(false);
+      setPayloadNotice("");
+      setActionNotice("Payload applied");
+      return result;
+    } catch (error) {
+      if (embedJobRef.current === jobId) {
+        setActionNotice(errorMessage(error));
+      }
+      return null;
+    } finally {
+      if (embedJobRef.current === jobId) {
+        setIsPreparing(false);
+      }
+    }
+  }, [stopPlayback]);
+
+  const resolvePlaybackBuffer = useCallback(async () => {
+    const carrier = carrierBufferRef.current;
+
+    if (!carrier) {
+      return null;
+    }
+
+    if (payloadDirtyRef.current) {
+      const payload = getPayloadInput();
+      if (payload) {
+        const result = await applyPayload(payload);
+        return result?.buffer ?? null;
+      }
+    }
+
+    return getActiveAugmented()?.buffer ?? carrier;
+  }, [applyPayload, getActiveAugmented, getPayloadInput]);
+
   const startPlayback = useCallback(async () => {
-    const buffer = getPlayableBuffer();
+    const buffer = await resolvePlaybackBuffer();
 
     if (!buffer) {
       return;
@@ -203,7 +325,7 @@ export function App() {
         playback.offset = 0;
         playback.source = null;
         syncPlaybackSnapshot();
-        updatePlayhead();
+        updatePlayhead(true);
       }
     });
 
@@ -217,8 +339,8 @@ export function App() {
     playback.playing = true;
     source.start(0, offset);
     syncPlaybackSnapshot();
-    updatePlayhead();
-  }, [getPlayableBuffer, getPlayback, syncPlaybackSnapshot, updatePlayhead]);
+    updatePlayhead(true);
+  }, [getPlayback, resolvePlaybackBuffer, syncPlaybackSnapshot, updatePlayhead]);
 
   const pausePlayback = useCallback(() => {
     const playback = playbackRef.current;
@@ -231,7 +353,7 @@ export function App() {
     stopSource(playback);
     playback.playing = false;
     syncPlaybackSnapshot();
-    updatePlayhead();
+    updatePlayhead(true);
   }, [stopSource, syncPlaybackSnapshot, updatePlayhead]);
 
   const togglePlay = useCallback(async () => {
@@ -261,12 +383,14 @@ export function App() {
       await startPlayback();
     } else {
       syncPlaybackSnapshot();
-      updatePlayhead();
+      updatePlayhead(true);
     }
   }, [getPlayableBuffer, getPlayback, startPlayback, stopSource, syncPlaybackSnapshot, updatePlayhead]);
 
   const loadCarrier = useCallback(async (file: File) => {
-    setStatus("Decoding carrier...");
+    setCarrierNotice("Decoding audio...");
+    setPayloadNotice("");
+    setActionNotice("");
     stopPlayback();
 
     try {
@@ -279,112 +403,108 @@ export function App() {
       setCarrierFile(file);
       setCarrierBuffer(buffer);
       setAugmented(null);
+      setAugmentedKey("");
       setDetected(embeddedPayload);
       setDetectedDataBuffer(embeddedDataBuffer);
-      setArtifacts([]);
+      setCarrierNotice("");
 
       if (embeddedPayload?.kind === "text" && embeddedPayload.text) {
         setPayloadMode("text");
         setTextPayload(embeddedPayload.text);
+        setFilePayload(null);
+        setPayloadDirty(false);
+      } else if (embeddedPayload?.kind === "file") {
+        setPayloadMode("file");
+        setFilePayload(null);
+        setPayloadDirty(false);
+      } else {
+        setPayloadDirty(hasPayloadInput(payloadModeRef.current, textPayloadRef.current, filePayloadRef.current));
       }
-
-      setStatus(embeddedPayload ? "Embedded payload found" : "Carrier ready");
     } catch (error) {
-      setStatus(errorMessage(error));
+      setCarrierNotice(errorMessage(error));
     }
   }, [stopPlayback]);
 
   const loadPayload = useCallback(async (file: File) => {
-    setStatus("Reading payload...");
+    setPayloadNotice("Reading file...");
 
     try {
       const payload = await readFilePayload(file);
       setFilePayload(payload);
       setPayloadMode("file");
-      setArtifacts([]);
-      setStatus("Payload ready");
+      setAugmented(null);
+      setAugmentedKey("");
+      setDetected(null);
+      setDetectedDataBuffer(null);
+      setPayloadDirty(true);
+      setPayloadNotice("");
+      setActionNotice(carrierBufferRef.current ? "Applying payload..." : "");
     } catch (error) {
-      setStatus(errorMessage(error));
+      setPayloadNotice(errorMessage(error));
     }
   }, []);
 
   const clearPayloadFile = useCallback(() => {
     setFilePayload(null);
     setPayloadMode("text");
-    setArtifacts([]);
+    setAugmented(null);
+    setAugmentedKey("");
+    setDetected(null);
+    setDetectedDataBuffer(null);
+    setPayloadDirty(Boolean(textPayloadRef.current.trim()));
+    setPayloadNotice("");
+    setActionNotice("");
   }, []);
 
-  const getPayloadInput = useCallback((): PayloadInput | null => {
-    if (payloadModeRef.current === "file") {
-      if (!filePayloadRef.current) {
-        setStatus("Drop payload file");
-        return null;
-      }
+  const selectPayloadMode = useCallback((mode: PayloadMode) => {
+    setPayloadMode(mode);
+    setPayloadNotice("");
+    setActionNotice("");
 
-      return filePayloadRef.current;
-    }
-
-    const text = textPayloadRef.current.trim();
-
-    if (!text) {
-      setStatus("Enter text");
-      return null;
-    }
-
-    return makeTextPayload(text);
+    const hasActiveOutput = augmentedRef.current?.payload.kind === mode || detectedRef.current?.kind === mode;
+    setPayloadDirty(hasPayloadInput(mode, textPayloadRef.current, filePayloadRef.current) && !hasActiveOutput);
   }, []);
 
-  const embedCurrentPayload = useCallback(async () => {
+  const exportCurrentAudio = useCallback(async () => {
     const carrier = carrierBufferRef.current;
 
     if (!carrier) {
-      setStatus("Drop carrier first");
+      setCarrierNotice("Drop audio here or click to select");
       return;
     }
 
-    const payload = getPayloadInput();
-
-    if (!payload) {
-      return;
-    }
-
-    setStatus("Embedding GGWave...");
-    stopPlayback();
+    setIsExporting(true);
+    setActionNotice("");
 
     try {
-      const result = await embedPayload(carrier, payload);
-      setAugmented(result);
-      setDetected(result.embedded);
-      setDetectedDataBuffer(null);
-      setArtifacts([]);
-      setStatus("Payload embedded");
-    } catch (error) {
-      setStatus(errorMessage(error));
-    }
-  }, [getPayloadInput, stopPlayback]);
+      let currentAugmented = getActiveAugmented();
 
-  const exportCurrentAudio = useCallback(async () => {
-    const currentAugmented = augmentedRef.current;
-    const buffer = currentAugmented?.buffer;
+      if (payloadDirtyRef.current) {
+        const payload = getPayloadInput({ require: true });
+        if (!payload) {
+          return;
+        }
+        currentAugmented = await applyPayload(payload);
+        if (!currentAugmented) {
+          return;
+        }
+      }
 
-    if (!buffer) {
-      setStatus("Embed first");
-      return;
-    }
-
-    setStatus("Exporting...");
-
-    try {
+      const regions = currentAugmented?.regions ?? getActiveDetected()?.regions ?? [];
+      const buffer = currentAugmented?.buffer ?? carrier;
       const exportedArtifacts = await exportAudio(buffer, baseName(carrierFileRef.current), async (candidate) => {
-        const foundPayload = await detectEmbeddedPayload(candidate, currentAugmented?.regions);
+        const foundPayload = await detectEmbeddedPayload(candidate, regions);
         return Boolean(foundPayload);
       });
-      setArtifacts(exportedArtifacts);
-      setStatus(exportedArtifacts.some((artifact) => artifact.verified) ? "Export verified" : "WAV fallback ready");
+      const artifact = chooseDownloadArtifact(exportedArtifacts);
+      downloadArtifact(artifact);
+      setActionNotice(artifact.verified ? "Export verified" : "WAV fallback downloaded");
     } catch (error) {
-      setStatus(errorMessage(error));
+      setActionNotice(errorMessage(error));
+    } finally {
+      setIsExporting(false);
     }
-  }, []);
+  }, [applyPayload, getActiveAugmented, getActiveDetected, getPayloadInput]);
 
   const downloadDetectedPayload = useCallback(() => {
     const currentDetected = detectedRef.current;
@@ -402,22 +522,6 @@ export function App() {
     link.click();
     URL.revokeObjectURL(link.href);
   }, []);
-
-  const onVisualizerKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
-      return;
-    }
-
-    const buffer = getPlayableBuffer();
-
-    if (!buffer) {
-      return;
-    }
-
-    event.preventDefault();
-    const deltaSeconds = event.key === "ArrowLeft" ? -5 : 5;
-    void seekPlayback(Math.max(0, Math.min(buffer.duration, getPlayheadTime() + deltaSeconds)));
-  }, [getPlayableBuffer, getPlayheadTime, seekPlayback]);
 
   const onDocumentDragOver = useCallback((event: DragEvent) => {
     event.preventDefault();
@@ -462,7 +566,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    updatePlayhead();
+    updatePlayhead(true);
   }, [carrierBuffer, augmented, detected, detectedDataBuffer, updatePlayhead]);
 
   useEffect(() => {
@@ -525,133 +629,144 @@ export function App() {
     void playback.context.close();
   }, [stopSource]);
 
+  useEffect(() => {
+    if (!carrierBuffer || payloadMode !== "file" || !filePayload || !payloadDirty) {
+      return;
+    }
+
+    void applyPayload(filePayload);
+  }, [applyPayload, carrierBuffer, filePayload, payloadDirty, payloadMode]);
+
+  useEffect(() => {
+    if (!carrierBuffer || payloadMode !== "text" || !payloadDirty) {
+      return undefined;
+    }
+
+    const text = textPayload.trim();
+
+    if (!text) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void applyPayload(makeTextPayload(text));
+    }, TEXT_APPLY_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [applyPayload, carrierBuffer, payloadDirty, payloadMode, textPayload]);
+
+  const activeAugmented = augmented?.payload.kind === payloadMode ? augmented : null;
+  const activeDetected = detected?.kind === payloadMode ? detected : null;
   const payloadLabelText = useMemo(() => payloadLabel(filePayload), [filePayload]);
-  const detectedDetail = useMemo(() => detectedMetadata(detected), [detected]);
+  const detectedFile = activeDetected?.kind === "file" ? activeDetected : null;
+  const detectedFileDetail = useMemo(() => detectedMetadata(detectedFile), [detectedFile]);
+  const filePanelLabel = payloadNotice || (filePayload ? payloadLabelText : detectedFileDetail || "Drop file here or click to select");
+  const filePanelHint = !payloadNotice && !filePayload && !detectedFileDetail ? `Max ${formatBytes(MAX_FILE_PAYLOAD_BYTES)}` : "";
   const visualizerRegions = useMemo(
-    () => [...(augmented?.regions ?? []), ...(detected?.regions ?? [])] as HighlightRegion[],
-    [augmented, detected],
+    () => [...(activeAugmented?.regions ?? []), ...(activeDetected?.regions ?? [])] as HighlightRegion[],
+    [activeAugmented, activeDetected],
   );
   const hasCarrier = Boolean(carrierBuffer);
-  const hasAugmented = Boolean(augmented);
   const hasPayload = payloadMode === "text" ? textPayload.trim().length > 0 : Boolean(filePayload);
-  const visualizerData = augmented?.dataBuffer ?? detectedDataBuffer;
+  const hasEncodedOutput = Boolean(activeAugmented || activeDetected);
+  const canExport = hasCarrier && (hasPayload || hasEncodedOutput);
+  const canStop = playbackSnapshot.playing || playbackSnapshot.offset > 0;
+  const carrierPanelLabel = carrierNotice
+    || (carrierFile && carrierBuffer ? `${carrierFile.name} · ${formatDuration(carrierBuffer.duration)}` : "Drop audio here or click to select");
+  const playLabel = playbackSnapshot.playing ? "Pause" : isPreparing ? "Applying..." : "Play";
+  const exportLabel = isExporting ? "Exporting..." : "Export";
+  const transportNotice = isExporting ? "Exporting..." : isPreparing ? "Applying payload..." : actionNotice;
+  const visualizerData = activeAugmented?.dataBuffer ?? (activeDetected ? detectedDataBuffer : null);
 
   return (
     <>
       <canvas className="node-field" ref={nodeCanvasRef} data-node-field aria-hidden="true" />
       <main className="app-shell">
         <section className="workbench" aria-label="GGWave audio embedder">
-          <header className="masthead">
-            <div>
-              <p className="eyebrow">Stepgrid</p>
-              <h1>Ultrasonic payload encoder</h1>
-            </div>
-            <div className="meter" data-status>{status}</div>
-          </header>
-
-          <div className="drop-grid">
-            <button className="dropzone primary" type="button" onClick={() => audioInputRef.current?.click()}>
-              <span>Carrier audio</span>
-              <strong>{carrierFile && carrierBuffer ? `${carrierFile.name} · ${formatDuration(carrierBuffer.duration)}` : "Drop MP3, WAV, M4A, OGG"}</strong>
-            </button>
-            <button className="dropzone" type="button" onClick={() => payloadInputRef.current?.click()}>
-              <span>Small payload</span>
-              <strong>{payloadLabelText}</strong>
-            </button>
-          </div>
-
-          <div className="mode-row" role="tablist" aria-label="Payload mode">
-            <button className={`mode${payloadMode === "text" ? " is-active" : ""}`} type="button" onClick={() => setPayloadMode("text")}>Text</button>
-            <button className={`mode${payloadMode === "file" ? " is-active" : ""}`} type="button" onClick={() => setPayloadMode("file")}>File</button>
-          </div>
-
-          <textarea
-            rows={4}
-            maxLength={2048}
-            spellCheck={false}
-            placeholder="Payload text"
-            value={textPayload}
-            onChange={(event) => {
-              setTextPayload(event.target.value);
-              if (payloadModeRef.current === "text") {
-                setArtifacts([]);
-              }
-            }}
-          />
-
-          <div className="file-card" hidden={payloadMode !== "file"}>
-            <div>
-              <span>Payload file</span>
-              <strong>{payloadLabelText}</strong>
-            </div>
-            <button type="button" onClick={clearPayloadFile}>Clear</button>
-          </div>
-
-          <div className="transport">
-            <button type="button" disabled={!hasCarrier} onClick={() => void togglePlay()}>{playbackSnapshot.playing ? "Pause" : "Play"}</button>
-            <button type="button" disabled={!playbackSnapshot.playing && !playbackSnapshot.offset} onClick={stopPlayback}>Stop</button>
-            <button type="button" disabled={!hasCarrier || !hasPayload} onClick={() => void embedCurrentPayload()}>Embed</button>
-            <button type="button" disabled={!hasAugmented} onClick={() => void exportCurrentAudio()}>Export</button>
-          </div>
-
-          <div className="detected" hidden={!detected}>
-            <div>
-              <span>Detected payload</span>
-              <strong>{detectedDetail}</strong>
-            </div>
-            <button type="button" hidden={detected?.kind !== "file"} onClick={downloadDetectedPayload}>Download payload</button>
-          </div>
-
-          <div className="downloads">
-            {artifacts.map((artifact: ExportArtifact) => (
-              <button
-                className={artifact.verified ? "download verified" : "download"}
-                key={`${artifact.fileName}-${artifact.kind}-${artifact.verified ? "verified" : "fallback"}`}
-                title={artifact.message}
-                type="button"
-                onClick={() => downloadArtifact(artifact)}
-              >
-                {artifact.kind.toUpperCase()} · {artifact.verified ? "verified" : "fallback"}
+          <div className="control-rail">
+            <div className="drop-grid">
+              <button className="dropzone primary" type="button" onClick={() => audioInputRef.current?.click()}>
+                <span>Carrier audio</span>
+                <strong>{carrierPanelLabel}</strong>
               </button>
-            ))}
-          </div>
-
-          <div className="visualizer-head">
-            <span>Fourier view</span>
-            <div className="mode-row visualizer-modes" role="tablist" aria-label="Fourier view mode">
-              {(["hybrid", "waterfall", "live"] as const).map((mode) => (
-                <button
-                  className={`mode${visualizerMode === mode ? " is-active" : ""}`}
-                  key={mode}
-                  type="button"
-                  onClick={() => setVisualizerMode(mode)}
-                >
-                  {mode[0].toUpperCase() + mode.slice(1)}
-                </button>
-              ))}
             </div>
+
+            <section className="payload-panel" aria-label="Payload">
+              <div className="mode-row" role="tablist" aria-label="Payload mode">
+                <button className={`mode${payloadMode === "text" ? " is-active" : ""}`} type="button" onClick={() => selectPayloadMode("text")}>Text</button>
+                <button className={`mode${payloadMode === "file" ? " is-active" : ""}`} type="button" onClick={() => selectPayloadMode("file")}>File</button>
+              </div>
+
+              <textarea
+                hidden={payloadMode !== "text"}
+                rows={3}
+                maxLength={2048}
+                spellCheck={false}
+                placeholder="Payload text"
+                value={textPayload}
+                className="payload-surface"
+                onChange={(event) => {
+                  const nextText = event.target.value;
+                  setTextPayload(nextText);
+                  setAugmented(null);
+                  setAugmentedKey("");
+                  setDetected(null);
+                  setDetectedDataBuffer(null);
+                  setPayloadDirty(Boolean(nextText.trim()));
+                  setPayloadNotice("");
+                  setActionNotice("");
+                }}
+              />
+
+              <div className="file-panel payload-surface" hidden={payloadMode !== "file"}>
+                <button className="dropzone" type="button" onClick={() => payloadInputRef.current?.click()}>
+                  <span>{detectedFile && !filePayload ? "Detected file" : "Payload file"}</span>
+                  <strong>{filePanelLabel}</strong>
+                  {filePanelHint ? <small>{filePanelHint}</small> : null}
+                </button>
+                <div className="file-actions" hidden={!filePayload && !detectedFile}>
+                  {filePayload ? <button type="button" onClick={clearPayloadFile}>Clear</button> : null}
+                  {detectedFile ? <button type="button" onClick={downloadDetectedPayload}>Download</button> : null}
+                </div>
+              </div>
+            </section>
           </div>
 
-          <div
-            className="spectrum"
-            aria-label="Fourier view"
-            tabIndex={0}
-            onKeyDown={onVisualizerKeyDown}
-          >
-            <FourierVisualizer
-              carrier={carrierBuffer}
-              data={visualizerData}
-              regions={visualizerRegions}
-              playheadTime={playheadTime}
-              playing={playbackSnapshot.playing}
-              liveFrequencyData={playbackSnapshot.playing ? frequencyDataRef.current : null}
-              liveSampleRate={playbackRef.current?.context.sampleRate ?? carrierBuffer?.sampleRate ?? null}
-              mode={visualizerMode}
-              onSeek={(time) => {
-                void seekPlayback(time);
-              }}
-            />
-          </div>
+          <section className="visual-panel" aria-label="Live Fourier view">
+            <div className="transport-panel" aria-label="Transport">
+              <div className="transport">
+                <button type="button" disabled={!hasCarrier || (!playbackSnapshot.playing && (isPreparing || isExporting))} onClick={() => void togglePlay()}>{playLabel}</button>
+                <button type="button" disabled={!canStop} onClick={stopPlayback}>Stop</button>
+                {transportNotice ? <span className="transport-status">{transportNotice}</span> : null}
+                <button className="export-button" type="button" disabled={!canExport || isPreparing || isExporting} onClick={() => void exportCurrentAudio()}>{exportLabel}</button>
+              </div>
+              <TransportWaveform
+                carrier={carrierBuffer}
+                data={visualizerData}
+                playheadTime={playheadTime}
+                regions={visualizerRegions}
+                onSeek={(time) => {
+                  void seekPlayback(time);
+                }}
+              />
+            </div>
+
+            <div
+              className="spectrum"
+              aria-label="Fourier view"
+            >
+              <FourierVisualizer
+                carrier={carrierBuffer}
+                data={visualizerData}
+                regions={visualizerRegions}
+                playheadTime={playheadTime}
+                liveFrequencyData={playbackSnapshot.playing ? frequencyDataRef.current : null}
+                liveSampleRate={playbackRef.current?.context.sampleRate ?? carrierBuffer?.sampleRate ?? null}
+              />
+            </div>
+          </section>
         </section>
       </main>
       <input
@@ -687,7 +802,7 @@ export function App() {
 
 function payloadLabel(payload: PayloadInput | null) {
   if (!payload || payload.kind !== "file") {
-    return `Drop file, max ${formatBytes(MAX_FILE_PAYLOAD_BYTES)}`;
+    return `Max ${formatBytes(MAX_FILE_PAYLOAD_BYTES)}`;
   }
 
   return `${payload.fileName} · ${formatBytes(payload.size)}`;
@@ -699,13 +814,217 @@ function detectedMetadata(detected: DetectedPayload | null) {
   }
 
   return detected.kind === "file"
-    ? `${detected.fileName ?? "payload"} · ${formatBytes(detected.size)} · ${detected.chunkCount} chunks`
-    : `${formatBytes(detected.size)} text · ${detected.chunkCount} chunks`;
+    ? `${detected.fileName ?? "payload"} · ${formatBytes(detected.size)}`
+    : `${formatBytes(detected.size)} text`;
+}
+
+function hasPayloadInput(mode: PayloadMode, text: string, filePayload: PayloadInput | null): boolean {
+  return mode === "text" ? text.trim().length > 0 : Boolean(filePayload);
+}
+
+function makeEmbedKey(file: File | null, carrier: AudioBuffer, payload: PayloadInput): string {
+  const carrierId = `${file?.name ?? "buffer"}:${file?.lastModified ?? 0}:${carrier.length}:${carrier.sampleRate}`;
+  const payloadId = payload.kind === "text"
+    ? `text:${payload.text}:${payload.size}`
+    : `file:${payload.fileName}:${payload.mimeType}:${payload.size}:${payload.bytes[0] ?? 0}:${payload.bytes[payload.bytes.length - 1] ?? 0}`;
+  return `${carrierId}|${payloadId}`;
+}
+
+function chooseDownloadArtifact(artifacts: readonly ExportArtifact[]): ExportArtifact {
+  const verifiedMp3 = artifacts.find((artifact) => artifact.kind === "mp3" && artifact.verified);
+  const verified = artifacts.find((artifact) => artifact.verified);
+  const wav = artifacts.find((artifact) => artifact.kind === "wav");
+  const fallback = verifiedMp3 ?? verified ?? wav ?? artifacts[0];
+
+  if (!fallback) {
+    throw new Error("Export failed.");
+  }
+
+  return fallback;
+}
+
+function TransportWaveform(props: {
+  carrier: AudioBuffer | null;
+  data: AudioBuffer | null;
+  regions: readonly HighlightRegion[];
+  playheadTime: number;
+  onSeek: (time: number) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.max(1, canvas.clientWidth);
+    const height = Math.max(1, canvas.clientHeight);
+    canvas.width = Math.round(width * pixelRatio);
+    canvas.height = Math.round(height * pixelRatio);
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    drawTransportWaveform(context, width, height, props.carrier, props.data, props.regions, props.playheadTime);
+  }, [props.carrier, props.data, props.playheadTime, props.regions]);
+
+  const duration = Math.max(props.carrier?.duration ?? 0, props.data?.duration ?? 0, 0);
+
+  return (
+    <canvas
+      className="transport-waveform"
+      ref={canvasRef}
+      aria-label="Transport waveform"
+      role="img"
+      onPointerDown={(event) => {
+        if (duration <= 0) {
+          return;
+        }
+        const bounds = event.currentTarget.getBoundingClientRect();
+        const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left) / Math.max(1, bounds.width)));
+        props.onSeek(ratio * duration);
+      }}
+    />
+  );
+}
+
+function drawTransportWaveform(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  carrier: AudioBuffer | null,
+  data: AudioBuffer | null,
+  regions: readonly HighlightRegion[],
+  playheadTime: number,
+): void {
+  context.clearRect(0, 0, width, height);
+
+  const duration = Math.max(carrier?.duration ?? 0, data?.duration ?? 0, 1);
+  const laneGap = 7;
+  const carrierHeight = Math.floor((height - laneGap) * 0.56);
+  const dataTop = carrierHeight + laneGap;
+  const dataHeight = Math.max(1, height - dataTop);
+
+  const gradient = context.createLinearGradient(0, 0, width, 0);
+  gradient.addColorStop(0, "rgba(84, 231, 255, 0.08)");
+  gradient.addColorStop(0.52, "rgba(216, 255, 79, 0.055)");
+  gradient.addColorStop(1, "rgba(255, 107, 157, 0.1)");
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, width, height);
+
+  for (const region of regions) {
+    if (region.end <= region.start) {
+      continue;
+    }
+    const left = (region.start / duration) * width;
+    const right = (region.end / duration) * width;
+    context.fillStyle = "rgba(255, 107, 157, 0.1)";
+    context.fillRect(left, dataTop, Math.max(1, right - left), dataHeight);
+  }
+
+  drawWaveformFill(context, carrier, 0, carrierHeight, width, "#54e7ff", 0.82, 10);
+  drawWaveformFill(context, data, dataTop, dataHeight, width, "#ff6b9d", 0.78, 10);
+
+  context.strokeStyle = "rgba(238, 244, 221, 0.16)";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(0, carrierHeight + laneGap / 2);
+  context.lineTo(width, carrierHeight + laneGap / 2);
+  context.stroke();
+
+  const x = Math.min(1, Math.max(0, playheadTime / duration)) * width;
+  context.fillStyle = "rgba(216, 255, 79, 0.95)";
+  context.fillRect(x - 1.5, 0, 3, height);
+}
+
+function drawWaveformFill(
+  context: CanvasRenderingContext2D,
+  buffer: AudioBuffer | null,
+  top: number,
+  height: number,
+  width: number,
+  color: string,
+  alpha: number,
+  maxGain: number,
+): void {
+  const centerY = top + height / 2;
+  const scaleY = height * 0.43;
+
+  context.save();
+  context.strokeStyle = color;
+  context.fillStyle = color;
+  context.globalAlpha = alpha;
+  context.lineWidth = 1.2;
+
+  if (!buffer) {
+    context.globalAlpha = 0.16;
+    context.beginPath();
+    context.moveTo(0, centerY);
+    context.lineTo(width, centerY);
+    context.stroke();
+    context.restore();
+    return;
+  }
+
+  const pixelCount = Math.max(1, Math.floor(width));
+  const samplesPerPixel = Math.max(1, Math.floor(buffer.length / pixelCount));
+  const peaks = new Float32Array(pixelCount);
+  let maxPeak = 0;
+
+  for (let x = 0; x < pixelCount; x += 1) {
+    const peak = readPeak(buffer, x * samplesPerPixel, samplesPerPixel);
+    peaks[x] = peak;
+    maxPeak = Math.max(maxPeak, peak);
+  }
+
+  const fitGain = maxPeak > 0 ? Math.min(maxGain, 0.88 / maxPeak) : 1;
+  context.beginPath();
+
+  for (let x = 0; x < pixelCount; x += 1) {
+    const peak = Math.min(1, peaks[x] * fitGain);
+    const y = centerY - peak * scaleY;
+    if (x === 0) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  }
+
+  for (let x = pixelCount - 1; x >= 0; x -= 1) {
+    const peak = Math.min(1, peaks[x] * fitGain);
+    context.lineTo(x, centerY + peak * scaleY);
+  }
+
+  context.closePath();
+  context.globalAlpha = alpha * 0.16;
+  context.fill();
+  context.globalAlpha = alpha;
+  context.stroke();
+  context.restore();
+}
+
+function readPeak(buffer: AudioBuffer, startSample: number, sampleCount: number): number {
+  const endSample = Math.min(buffer.length, startSample + sampleCount);
+  let peak = 0;
+
+  for (let sampleIndex = startSample; sampleIndex < endSample; sampleIndex += 1) {
+    let sum = 0;
+    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+      sum += buffer.getChannelData(channel)[sampleIndex] ?? 0;
+    }
+    peak = Math.max(peak, Math.abs(sum / Math.max(1, buffer.numberOfChannels)));
+  }
+
+  return peak;
 }
 
 function baseName(file: File | null) {
-  const name = file?.name ?? "stepgrid";
-  return name.replace(/\.[^.]+$/, "") || "stepgrid";
+  const name = file?.name ?? "ultrasonic-encoder";
+  return name.replace(/\.[^.]+$/, "") || "ultrasonic-encoder";
 }
 
 function isAudioFile(file: File) {

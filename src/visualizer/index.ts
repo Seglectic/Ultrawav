@@ -1,5 +1,4 @@
 export type {
-  FourierMode,
   FourierRegion,
   FourierVisualizerProps,
 } from "./types";

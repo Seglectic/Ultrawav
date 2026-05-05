@@ -1,5 +1,3 @@
-export type FourierMode = "hybrid" | "waterfall" | "live";
-
 export type FourierRegion = {
   start: number;
   end: number;
@@ -11,11 +9,8 @@ export type FourierVisualizerProps = {
   data: AudioBuffer | null;
   regions: readonly FourierRegion[];
   playheadTime: number | null;
-  playing: boolean;
   liveFrequencyData: Float32Array | Uint8Array | null;
   liveSampleRate: number | null;
-  mode: FourierMode;
-  onSeek: (time: number) => void;
 };
 
 export type SpectrogramLayer = {
