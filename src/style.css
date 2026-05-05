@@ -46,7 +46,7 @@ button {
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.46;
+  opacity: 0.22;
 }
 
 [hidden] {
@@ -294,6 +294,20 @@ textarea:focus {
   min-width: 86px;
 }
 
+.transport .transport-icon-button {
+  width: 38px;
+  min-width: 38px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+}
+
+.transport-icon-button svg {
+  width: 1.24em;
+  height: 1.24em;
+  display: block;
+}
+
 .export-button {
   margin-left: auto;
 }
@@ -382,6 +396,11 @@ textarea:focus {
 
   .transport button {
     min-width: 0;
+  }
+
+  .transport .transport-icon-button {
+    width: 36px;
+    min-width: 36px;
   }
 
   .export-button {

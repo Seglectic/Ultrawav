@@ -9,11 +9,16 @@
     "preview": "vp preview"
   },
   "devDependencies": {
+    "@iconify/json": "^2.2.469",
+    "@svgr/core": "^8.1.0",
+    "@svgr/plugin-jsx": "^8.1.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.184.0",
     "@vitejs/plugin-react": "^6.0.1",
     "typescript": "~6.0.2",
+    "unplugin-auto-import": "^21.0.0",
+    "unplugin-icons": "^23.0.1",
     "vite": "npm:@voidzero-dev/vite-plus-core@latest",
     "vite-plus": "latest"
   },
