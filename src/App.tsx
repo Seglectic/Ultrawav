@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import FFTConstructor from "fft.js";
 
 import {
   MAX_FILE_PAYLOAD_BYTES,
@@ -40,6 +41,9 @@ const INITIAL_PLAYBACK: PlaybackSnapshot = {
   offset: 0,
 };
 const TEXT_APPLY_DEBOUNCE_MS = 650;
+const LIVE_SPECTRUM_FFT_SIZE = 4096;
+const LIVE_SPECTRUM_MIN_HZ = 30;
+const LIVE_SPECTRUM_MAX_HZ = 22_000;
 
 export function App() {
   const [carrierFile, setCarrierFile] = useState<File | null>(null);
@@ -801,8 +805,9 @@ export function App() {
                 liveSampleRate={playbackRef.current?.context.sampleRate ?? carrierBuffer?.sampleRate ?? null}
               />
             </div>
-            <LiveWaveform
-              timeData={playbackSnapshot.playing ? timeDataRef.current : null}
+            <LiveSpectrum
+              frequencyData={playbackSnapshot.playing ? frequencyDataRef.current : null}
+              sampleRate={playbackRef.current?.context.sampleRate ?? carrierBuffer?.sampleRate ?? null}
               data={visualizerData}
               playing={playbackSnapshot.playing}
               getPlayheadTime={getPlayheadTime}
@@ -933,13 +938,29 @@ function TransportWaveform(props: {
   );
 }
 
-function LiveWaveform(props: {
-  timeData: Uint8Array | null;
+type LiveSpectrumCache = {
+  fft: {
+    createComplexArray: () => number[];
+    realTransform: (output: number[], input: Float32Array) => void;
+  };
+  frame: Float32Array;
+  spectrum: number[];
+  audioMagnitudes: Float32Array;
+  dataMagnitudes: Float32Array;
+  lastBuffer: AudioBuffer | null;
+  lastBucket: number;
+  lastPixelCount: number;
+};
+
+function LiveSpectrum(props: {
+  frequencyData: Uint8Array | null;
+  sampleRate: number | null;
   data: AudioBuffer | null;
   playing: boolean;
   getPlayheadTime: () => number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cacheRef = useRef<LiveSpectrumCache | null>(null);
   const propsRef = useRef(props);
   propsRef.current = props;
 
@@ -973,7 +994,8 @@ function LiveWaveform(props: {
         }
 
         context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-        drawLiveWaveform(context, width, height, propsRef.current);
+        cacheRef.current ??= createLiveSpectrumCache();
+        drawLiveSpectrum(context, width, height, propsRef.current, cacheRef.current);
       }
 
       frameId = requestAnimationFrame(draw);
@@ -988,12 +1010,27 @@ function LiveWaveform(props: {
 
   return (
     <canvas
-      className="live-waveform"
+      className="live-spectrum"
       ref={canvasRef}
-      aria-label="Live audio and data waveform"
+      aria-label="Live audio and data spectrum"
       role="img"
     />
   );
+}
+
+function createLiveSpectrumCache(): LiveSpectrumCache {
+  const fft = new FFTConstructor(LIVE_SPECTRUM_FFT_SIZE);
+
+  return {
+    fft,
+    frame: new Float32Array(LIVE_SPECTRUM_FFT_SIZE),
+    spectrum: fft.createComplexArray() as number[],
+    audioMagnitudes: new Float32Array(0),
+    dataMagnitudes: new Float32Array(0),
+    lastBuffer: null,
+    lastBucket: -1,
+    lastPixelCount: 0,
+  };
 }
 
 function drawTransportWaveform(
@@ -1045,211 +1082,271 @@ function drawTransportWaveform(
   context.fillRect(x - 1.5, 0, 3, height);
 }
 
-function drawLiveWaveform(
+function drawLiveSpectrum(
   context: CanvasRenderingContext2D,
   width: number,
   height: number,
   props: {
-    timeData: Uint8Array | null;
+    frequencyData: Uint8Array | null;
+    sampleRate: number | null;
     data: AudioBuffer | null;
     playing: boolean;
     getPlayheadTime: () => number;
   },
+  cache: LiveSpectrumCache,
 ): void {
   context.clearRect(0, 0, width, height);
 
-  const laneGap = 4;
-  const padX = 8;
-  const padY = 4;
-  const laneHeight = Math.max(1, (height - padY * 2 - laneGap) / 2);
-  const topLane = padY;
-  const bottomLane = topLane + laneHeight + laneGap;
+  const padX = 10;
+  const padY = 7;
   const drawWidth = Math.max(1, width - padX * 2);
+  const drawHeight = Math.max(1, height - padY * 2 - 10);
+  const bottom = padY + drawHeight;
+  const pixelCount = Math.max(2, Math.floor(drawWidth));
+  const sampleRate = props.sampleRate ?? props.data?.sampleRate ?? 44_100;
+  const maxFrequency = Math.min(LIVE_SPECTRUM_MAX_HZ, sampleRate / 2);
+
+  if (cache.audioMagnitudes.length !== pixelCount) {
+    cache.audioMagnitudes = new Float32Array(pixelCount);
+  }
 
   context.fillStyle = "rgba(2, 5, 10, 0.48)";
   context.fillRect(0, 0, width, height);
+  drawSpectrumGrid(context, padX, padY, drawWidth, drawHeight, maxFrequency);
 
-  context.strokeStyle = "rgba(238, 244, 221, 0.1)";
-  context.lineWidth = 1;
-  context.beginPath();
-  context.moveTo(0, bottomLane - laneGap / 2);
-  context.lineTo(width, bottomLane - laneGap / 2);
-  context.stroke();
-
-  drawLiveByteWaveform(context, props.timeData, props.playing, padX, topLane, drawWidth, laneHeight, "#54e7ff");
-  drawLiveBufferWindow(
-    context,
+  writeAnalyserSpectrum(
+    cache.audioMagnitudes,
+    props.frequencyData,
+    sampleRate,
+    props.playing,
+    maxFrequency,
+  );
+  const dataMagnitudes = getDataSpectrum(
+    cache,
     props.data,
     props.playing ? props.getPlayheadTime() : 0,
     props.playing,
-    padX,
-    bottomLane,
-    drawWidth,
-    laneHeight,
-    "#ff6b9d",
+    pixelCount,
+    maxFrequency,
   );
-}
 
-function drawLiveByteWaveform(
-  context: CanvasRenderingContext2D,
-  timeData: Uint8Array | null,
-  active: boolean,
-  left: number,
-  top: number,
-  width: number,
-  height: number,
-  color: string,
-): void {
-  const centerY = top + height / 2;
-  const scaleY = height * 0.42;
+  drawSpectrumTrace(context, cache.audioMagnitudes, padX, padY, drawWidth, drawHeight, "#54e7ff", 0.88, 0.12, 7);
+  drawSpectrumTrace(context, dataMagnitudes, padX, padY, drawWidth, drawHeight, "#ff6b9d", 0.82, 0.1, 7);
 
-  if (!active || !timeData || timeData.length === 0) {
-    drawLiveBaseline(context, left, centerY, width, color);
-    return;
-  }
+  context.fillStyle = "rgba(159, 178, 186, 0.78)";
+  context.font = "600 10px Avenir Next, Segoe UI, sans-serif";
+  context.textBaseline = "bottom";
+  context.textAlign = "left";
+  context.fillText(formatFrequencyLabel(LIVE_SPECTRUM_MIN_HZ), padX, height - 3);
+  context.textAlign = "right";
+  context.fillText(formatFrequencyLabel(maxFrequency), padX + drawWidth, height - 3);
 
-  let maxAbs = 0;
-  for (let index = 0; index < timeData.length; index += 1) {
-    maxAbs = Math.max(maxAbs, Math.abs((timeData[index] - 128) / 128));
-  }
-
-  if (maxAbs < 0.004) {
-    drawLiveBaseline(context, left, centerY, width, color);
-    return;
-  }
-
-  const gain = Math.min(5, 0.9 / maxAbs);
-  const pixelCount = Math.max(2, Math.floor(width));
-
-  context.save();
-  context.strokeStyle = color;
-  context.shadowColor = color;
-  context.shadowBlur = 6;
-  context.globalAlpha = 0.9;
-  context.lineWidth = 1.15;
+  context.strokeStyle = "rgba(238, 244, 221, 0.18)";
   context.beginPath();
-
-  for (let x = 0; x < pixelCount; x += 1) {
-    const ratio = x / Math.max(1, pixelCount - 1);
-    const index = Math.min(timeData.length - 1, Math.floor(ratio * timeData.length));
-    const normalized = ((timeData[index] - 128) / 128) * gain;
-    const y = centerY - Math.max(-1, Math.min(1, normalized)) * scaleY;
-
-    if (x === 0) {
-      context.moveTo(left + x, y);
-    } else {
-      context.lineTo(left + x, y);
-    }
-  }
-
+  context.moveTo(padX, bottom);
+  context.lineTo(padX + drawWidth, bottom);
   context.stroke();
-  context.restore();
 }
 
-function drawLiveBufferWindow(
-  context: CanvasRenderingContext2D,
+function writeAnalyserSpectrum(
+  target: Float32Array,
+  frequencyData: Uint8Array | null,
+  sampleRate: number,
+  active: boolean,
+  maxFrequency: number,
+): void {
+  target.fill(0);
+
+  if (!active || !frequencyData || frequencyData.length === 0) {
+    return;
+  }
+
+  const nyquist = sampleRate / 2;
+  const maxBin = Math.max(1, frequencyData.length - 1);
+
+  for (let index = 0; index < target.length; index += 1) {
+    const frequency = spectrumFrequencyAt(index, target.length, maxFrequency);
+    const bin = Math.min(maxBin, Math.max(0, (frequency / nyquist) * maxBin));
+    const leftBin = Math.floor(bin);
+    const rightBin = Math.min(maxBin, leftBin + 1);
+    const ratio = bin - leftBin;
+    const magnitude = ((frequencyData[leftBin] ?? 0) * (1 - ratio) + (frequencyData[rightBin] ?? 0) * ratio) / 255;
+    target[index] = Math.pow(Math.max(0, magnitude), 0.68);
+  }
+}
+
+function getDataSpectrum(
+  cache: LiveSpectrumCache,
   buffer: AudioBuffer | null,
   playheadTime: number,
   active: boolean,
+  pixelCount: number,
+  maxFrequency: number,
+): Float32Array {
+  if (cache.dataMagnitudes.length !== pixelCount) {
+    cache.dataMagnitudes = new Float32Array(pixelCount);
+    cache.lastPixelCount = 0;
+  }
+
+  if (!active || !buffer) {
+    cache.dataMagnitudes.fill(0);
+    cache.lastBuffer = buffer;
+    cache.lastBucket = -1;
+    cache.lastPixelCount = pixelCount;
+    return cache.dataMagnitudes;
+  }
+
+  const centerSample = Math.round(playheadTime * buffer.sampleRate);
+  const bucketSize = Math.max(1, Math.floor(buffer.sampleRate / 30));
+  const bucket = Math.floor(centerSample / bucketSize);
+
+  if (cache.lastBuffer === buffer && cache.lastBucket === bucket && cache.lastPixelCount === pixelCount) {
+    return cache.dataMagnitudes;
+  }
+
+  cache.frame.fill(0);
+  const lastStart = Math.max(0, buffer.length - LIVE_SPECTRUM_FFT_SIZE);
+  const startSample = Math.max(0, Math.min(lastStart, centerSample - Math.floor(LIVE_SPECTRUM_FFT_SIZE / 2)));
+  const channels = Array.from({ length: buffer.numberOfChannels }, (_, channel) => buffer.getChannelData(channel));
+
+  for (let windowIndex = 0; windowIndex < LIVE_SPECTRUM_FFT_SIZE; windowIndex += 1) {
+    const sampleIndex = startSample + windowIndex;
+    let sum = 0;
+
+    for (let channel = 0; channel < channels.length; channel += 1) {
+      sum += channels[channel][sampleIndex] ?? 0;
+    }
+
+    const windowValue = 0.5 - 0.5 * Math.cos((Math.PI * 2 * windowIndex) / Math.max(1, LIVE_SPECTRUM_FFT_SIZE - 1));
+    cache.frame[windowIndex] = (sum / Math.max(1, channels.length)) * windowValue;
+  }
+
+  cache.fft.realTransform(cache.spectrum, cache.frame);
+
+  const frequencyToFftBin = LIVE_SPECTRUM_FFT_SIZE / buffer.sampleRate;
+  let peak = 0.000_001;
+
+  for (let index = 0; index < pixelCount; index += 1) {
+    const frequency = spectrumFrequencyAt(index, pixelCount, maxFrequency);
+    const fftBin = Math.min(
+      Math.floor(LIVE_SPECTRUM_FFT_SIZE / 2) - 1,
+      Math.max(1, Math.round(frequency * frequencyToFftBin)),
+    );
+    const real = cache.spectrum[fftBin * 2] ?? 0;
+    const imaginary = cache.spectrum[fftBin * 2 + 1] ?? 0;
+    const magnitude = Math.sqrt(real * real + imaginary * imaginary) / LIVE_SPECTRUM_FFT_SIZE;
+    cache.dataMagnitudes[index] = magnitude;
+    peak = Math.max(peak, magnitude);
+  }
+
+  for (let index = 0; index < cache.dataMagnitudes.length; index += 1) {
+    const normalized = cache.dataMagnitudes[index] / peak;
+    cache.dataMagnitudes[index] = Math.min(1, Math.log1p(normalized * 18) / Math.log1p(18));
+  }
+
+  cache.lastBuffer = buffer;
+  cache.lastBucket = bucket;
+  cache.lastPixelCount = pixelCount;
+
+  return cache.dataMagnitudes;
+}
+
+function drawSpectrumGrid(
+  context: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  maxFrequency: number,
+): void {
+  context.save();
+  context.strokeStyle = "rgba(238, 244, 221, 0.075)";
+  context.lineWidth = 1;
+
+  for (let row = 1; row <= 3; row += 1) {
+    const y = top + (height * row) / 4;
+    context.beginPath();
+    context.moveTo(left, y);
+    context.lineTo(left + width, y);
+    context.stroke();
+  }
+
+  for (const frequency of [100, 1_000, 10_000]) {
+    if (frequency <= LIVE_SPECTRUM_MIN_HZ || frequency >= maxFrequency) {
+      continue;
+    }
+
+    const ratio = spectrumFrequencyRatio(frequency, maxFrequency);
+    const x = left + ratio * width;
+    context.beginPath();
+    context.moveTo(x, top);
+    context.lineTo(x, top + height);
+    context.stroke();
+  }
+
+  context.restore();
+}
+
+function drawSpectrumTrace(
+  context: CanvasRenderingContext2D,
+  magnitudes: Float32Array,
   left: number,
   top: number,
   width: number,
   height: number,
   color: string,
+  lineAlpha: number,
+  fillAlpha: number,
+  shadowBlur: number,
 ): void {
-  const centerY = top + height / 2;
-  const scaleY = height * 0.42;
-
-  if (!active || !buffer) {
-    drawLiveBaseline(context, left, centerY, width, color);
-    return;
-  }
-
-  const windowSamples = Math.max(Math.floor(buffer.sampleRate * 0.09), Math.floor(width * 3));
-  const centerSample = Math.round(playheadTime * buffer.sampleRate);
-  const startSample = Math.max(0, Math.min(buffer.length - windowSamples, centerSample - Math.floor(windowSamples / 2)));
-  const pixelCount = Math.max(2, Math.floor(width));
-  const channels = Array.from({ length: buffer.numberOfChannels }, (_, channel) => buffer.getChannelData(channel));
-  const mins = new Float32Array(pixelCount);
-  const maxes = new Float32Array(pixelCount);
-  let maxAbs = 0;
-
-  for (let x = 0; x < pixelCount; x += 1) {
-    const bucketStart = startSample + Math.floor((x / pixelCount) * windowSamples);
-    const bucketEnd = Math.min(buffer.length, startSample + Math.floor(((x + 1) / pixelCount) * windowSamples));
-    let minValue = 0;
-    let maxValue = 0;
-
-    for (let sampleIndex = bucketStart; sampleIndex < bucketEnd; sampleIndex += 1) {
-      let sum = 0;
-      for (let channel = 0; channel < channels.length; channel += 1) {
-        sum += channels[channel][sampleIndex] ?? 0;
-      }
-
-      const value = sum / Math.max(1, channels.length);
-      minValue = Math.min(minValue, value);
-      maxValue = Math.max(maxValue, value);
-    }
-
-    mins[x] = minValue;
-    maxes[x] = maxValue;
-    maxAbs = Math.max(maxAbs, Math.abs(minValue), Math.abs(maxValue));
-  }
-
-  if (maxAbs < 0.003) {
-    drawLiveBaseline(context, left, centerY, width, color);
-    return;
-  }
-
-  const gain = Math.min(8, 0.9 / maxAbs);
+  const bottom = top + height;
 
   context.save();
   context.strokeStyle = color;
   context.fillStyle = color;
   context.shadowColor = color;
-  context.shadowBlur = 7;
-  context.globalAlpha = 0.82;
-  context.lineWidth = 1;
+  context.shadowBlur = shadowBlur;
+  context.lineWidth = 1.1;
   context.beginPath();
 
-  for (let x = 0; x < pixelCount; x += 1) {
-    const y = centerY - Math.max(-1, Math.min(1, maxes[x] * gain)) * scaleY;
-    if (x === 0) {
-      context.moveTo(left + x, y);
+  for (let index = 0; index < magnitudes.length; index += 1) {
+    const ratio = index / Math.max(1, magnitudes.length - 1);
+    const value = Math.max(0, Math.min(1, magnitudes[index]));
+    const x = left + ratio * width;
+    const y = bottom - value * height;
+
+    if (index === 0) {
+      context.moveTo(x, y);
     } else {
-      context.lineTo(left + x, y);
+      context.lineTo(x, y);
     }
   }
 
-  for (let x = pixelCount - 1; x >= 0; x -= 1) {
-    const y = centerY - Math.max(-1, Math.min(1, mins[x] * gain)) * scaleY;
-    context.lineTo(left + x, y);
-  }
-
-  context.closePath();
-  context.globalAlpha = 0.12;
-  context.fill();
-  context.globalAlpha = 0.84;
+  context.globalAlpha = lineAlpha;
   context.stroke();
+  context.lineTo(left + width, bottom);
+  context.lineTo(left, bottom);
+  context.closePath();
+  context.globalAlpha = fillAlpha;
+  context.fill();
   context.restore();
 }
 
-function drawLiveBaseline(
-  context: CanvasRenderingContext2D,
-  left: number,
-  centerY: number,
-  width: number,
-  color: string,
-): void {
-  context.save();
-  context.strokeStyle = color;
-  context.globalAlpha = 0.18;
-  context.lineWidth = 1;
-  context.beginPath();
-  context.moveTo(left, centerY);
-  context.lineTo(left + width, centerY);
-  context.stroke();
-  context.restore();
+function spectrumFrequencyAt(index: number, count: number, maxFrequency: number): number {
+  const ratio = index / Math.max(1, count - 1);
+  const logMin = Math.log(LIVE_SPECTRUM_MIN_HZ);
+  const logMax = Math.log(Math.max(LIVE_SPECTRUM_MIN_HZ + 1, maxFrequency));
+  return Math.exp(logMin + (logMax - logMin) * ratio);
+}
+
+function spectrumFrequencyRatio(frequency: number, maxFrequency: number): number {
+  const logMin = Math.log(LIVE_SPECTRUM_MIN_HZ);
+  const logMax = Math.log(Math.max(LIVE_SPECTRUM_MIN_HZ + 1, maxFrequency));
+  return (Math.log(frequency) - logMin) / (logMax - logMin);
+}
+
+function formatFrequencyLabel(frequency: number): string {
+  return frequency >= 1_000 ? `${Math.round(frequency / 1_000)} kHz` : `${Math.round(frequency)} Hz`;
 }
 
 function drawWaveformFill(
