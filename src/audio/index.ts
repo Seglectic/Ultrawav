@@ -8,10 +8,10 @@ import type { DetectedPayload, EmbedResult, ExportArtifact, HighlightRegion, Pay
 export { MAX_FILE_PAYLOAD_BYTES };
 export type { DetectedPayload, EmbedResult, ExportArtifact, HighlightRegion, PayloadInput };
 
-const TEXT_EMBED_START_SECONDS = 0.5;
 const TAIL_EMBED_GAP_SECONDS = 0.5;
 const FRAME_GAP_SECONDS = 0.25;
-const EMBED_SIGNAL_GAIN = 0.35;
+const EMBED_SIGNAL_GAIN = 0.18;
+const EMBED_SIGNAL_FADE_SECONDS = 0.01;
 const CARRIER_LOW_PASS_HZ = 14_000;
 const DETECTION_START_SECONDS = 90;
 const DETECTION_TAIL_SECONDS = 600;
@@ -78,9 +78,10 @@ const frameLabel = (payload: PayloadInput): string => payload.kind === "text" ? 
 
 export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput): Promise<EmbedResult> => {
   const frames = encodeFrames(payload);
-  const encodedFrames = await Promise.all(frames.map((frame) => encodeGgWave(frame, carrier.sampleRate)));
+  const fadeSamples = Math.round(EMBED_SIGNAL_FADE_SECONDS * carrier.sampleRate);
+  const encodedFrames = await Promise.all(frames.map(async (frame) => fadeSignalEdges(await encodeGgWave(frame, carrier.sampleRate), fadeSamples)));
   const frameGapSamples = Math.round(FRAME_GAP_SECONDS * carrier.sampleRate);
-  const embedStartSeconds = payload.kind === "text" ? TEXT_EMBED_START_SECONDS : carrier.duration + TAIL_EMBED_GAP_SECONDS;
+  const embedStartSeconds = carrier.duration + TAIL_EMBED_GAP_SECONDS;
   let cursor = Math.round(embedStartSeconds * carrier.sampleRate);
 
   const embeddedLength = encodedFrames.reduce(
@@ -148,6 +149,23 @@ export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput):
   };
 };
 
+const fadeSignalEdges = (signal: Float32Array, fadeSamples: number): Float32Array => {
+  if (fadeSamples <= 1) {
+    return signal;
+  }
+
+  const faded = new Float32Array(signal);
+  const fadeLength = Math.min(fadeSamples, Math.floor(faded.length / 2));
+
+  for (let index = 0; index < fadeLength; index += 1) {
+    const gain = index / fadeLength;
+    faded[index] *= gain;
+    faded[faded.length - 1 - index] *= gain;
+  }
+
+  return faded;
+};
+
 const scanRegion = async (
   buffer: AudioBuffer,
   startSeconds: number,
@@ -188,16 +206,7 @@ const scanRegion = async (
   }
 };
 
-export const detectEmbeddedPayload = async (buffer: AudioBuffer): Promise<DetectedPayload | null> => {
-  const frames = new Map<string, ReturnType<typeof decodeFrame>>();
-  const duration = buffer.duration;
-  await scanRegion(buffer, 0, Math.min(duration, DETECTION_START_SECONDS), frames);
-
-  const tailStart = Math.max(0, duration - DETECTION_TAIL_SECONDS);
-  if (tailStart > DETECTION_START_SECONDS) {
-    await scanRegion(buffer, tailStart, duration, frames);
-  }
-
+const assembleDetectedFrames = (frames: Map<string, ReturnType<typeof decodeFrame>>): DetectedPayload | null => {
   const frameList = [...frames.values()].filter((frame) => frame !== null);
   const groups = new Map<string, typeof frameList>();
 
@@ -216,6 +225,32 @@ export const detectEmbeddedPayload = async (buffer: AudioBuffer): Promise<Detect
   }
 
   return null;
+};
+
+export const detectEmbeddedPayload = async (
+  buffer: AudioBuffer,
+  regions: readonly HighlightRegion[] = [],
+): Promise<DetectedPayload | null> => {
+  const frames = new Map<string, ReturnType<typeof decodeFrame>>();
+  const duration = buffer.duration;
+
+  for (const region of regions) {
+    await scanRegion(buffer, region.start, Math.min(duration, region.end), frames);
+  }
+
+  const detectedFromRegions = assembleDetectedFrames(frames);
+  if (detectedFromRegions !== null) {
+    return detectedFromRegions;
+  }
+
+  await scanRegion(buffer, 0, Math.min(duration, DETECTION_START_SECONDS), frames);
+
+  const tailStart = Math.max(0, duration - DETECTION_TAIL_SECONDS);
+  if (tailStart > DETECTION_START_SECONDS) {
+    await scanRegion(buffer, tailStart, duration, frames);
+  }
+
+  return assembleDetectedFrames(frames);
 };
 
 export const exportAudio = (

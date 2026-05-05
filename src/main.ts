@@ -328,7 +328,7 @@ async function exportCurrentAudio() {
 
   try {
     state.artifacts = await exportAudio(buffer, baseName(), async (candidate) => {
-      const detected = await detectEmbeddedPayload(candidate);
+      const detected = await detectEmbeddedPayload(candidate, state.augmented?.regions);
       return Boolean(detected);
     });
     setStatus(state.artifacts.some((artifact) => artifact.verified) ? "Export verified" : "WAV fallback ready");

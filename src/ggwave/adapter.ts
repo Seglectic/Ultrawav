@@ -3,6 +3,7 @@ import createGgWave, { type GgWaveModule, type GgWaveParameters, type GgWaveProt
 const GGWAVE_VOLUME = 10;
 const PCM_8_MAX = 127;
 const PCM_8_MIN = -128;
+const DECODE_NORMALIZE_FLOOR = 0.000_001;
 
 let modulePromise: Promise<GgWaveModule> | null = null;
 
@@ -13,8 +14,14 @@ type GgWaveInstance = {
   id: number;
 };
 
+const createSilentModule = (): Promise<GgWaveModule> =>
+  createGgWave({
+    print: () => undefined,
+    printErr: () => undefined,
+  });
+
 const getModule = async (): Promise<GgWaveModule> => {
-  modulePromise ??= createGgWave();
+  modulePromise ??= createSilentModule();
   return modulePromise;
 };
 
@@ -29,6 +36,17 @@ const makeParameters = (module: GgWaveModule, sampleRate: number): GgWaveParamet
 
 const withInstance = async <T>(sampleRate: number, run: (instance: GgWaveInstance) => T): Promise<T> => {
   const module = await getModule();
+  const id = module.init(makeParameters(module, sampleRate));
+
+  try {
+    return run({ module, id });
+  } finally {
+    module.free(id);
+  }
+};
+
+const withFreshInstance = async <T>(sampleRate: number, run: (instance: GgWaveInstance) => T): Promise<T> => {
+  const module = await createSilentModule();
   const id = module.init(makeParameters(module, sampleRate));
 
   try {
@@ -87,12 +105,17 @@ export const encodeGgWave = async (payload: GgWavePayload, sampleRate: number): 
 
 export const decodeGgWave = async (samples: Float32Array, sampleRate: number): Promise<Uint8Array | null> => {
   const bytes = new Int8Array(samples.length);
+  let peak = DECODE_NORMALIZE_FLOOR;
+
+  for (const sample of samples) {
+    peak = Math.max(peak, Math.abs(sample));
+  }
 
   for (let index = 0; index < samples.length; index += 1) {
-    const clamped = Math.max(-1, Math.min(1, samples[index]));
+    const clamped = Math.max(-1, Math.min(1, samples[index] / peak));
     const intSample = clamped < 0 ? clamped * -PCM_8_MIN : clamped * PCM_8_MAX;
     bytes[index] = Math.round(intSample);
   }
 
-  return withInstance(sampleRate, ({ module, id }) => bytesFromDecoded(module.decode(id, bytes)));
+  return withFreshInstance(sampleRate, ({ module, id }) => bytesFromDecoded(module.decode(id, bytes)));
 };

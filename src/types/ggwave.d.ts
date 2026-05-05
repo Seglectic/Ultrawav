@@ -32,5 +32,8 @@ declare module "@vpalmisano/ggwave" {
     decode(instance: number, waveform: Int8Array | Uint8Array): Int8Array | Uint8Array | string | null;
   };
 
-  export default function createGgWave(): Promise<GgWaveModule>;
+  export default function createGgWave(options?: {
+    print?: (message: string) => void;
+    printErr?: (message: string) => void;
+  }): Promise<GgWaveModule>;
 }

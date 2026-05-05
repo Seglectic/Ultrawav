@@ -1,12 +1,8 @@
-import { AudioSample, AudioSampleSource, BufferTarget, Mp3OutputFormat, Output, canEncodeAudio } from "mediabunny";
-
 import type { ExportArtifact } from "../types/payload";
 
 const PCM_16_MAX = 32767;
 const PCM_16_MIN = -32768;
 const WAV_HEADER_BYTES = 44;
-const MP3_BITRATE = 320000;
-let mp3EncoderRegistered = false;
 
 const sanitizeBaseName = (baseName: string): string => {
   const clean = baseName.trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "");
@@ -74,44 +70,6 @@ export const encodeWavBlob = (buffer: AudioBuffer): Blob => {
   return new Blob([wavBytes], { type: "audio/wav" });
 };
 
-const encodeMp3Blob = async (buffer: AudioBuffer): Promise<Blob> => {
-  if (!mp3EncoderRegistered) {
-    const { registerMp3Encoder } = await import("@mediabunny/mp3-encoder");
-    registerMp3Encoder();
-    mp3EncoderRegistered = true;
-  }
-
-  if (!(await canEncodeAudio("mp3", { bitrate: MP3_BITRATE, numberOfChannels: buffer.numberOfChannels, sampleRate: buffer.sampleRate }))) {
-    throw new Error("MP3 encoding is unavailable in this browser.");
-  }
-
-  const target = new BufferTarget();
-  const output = new Output({
-    format: new Mp3OutputFormat(),
-    target,
-  });
-  const source = new AudioSampleSource({ codec: "mp3", bitrate: MP3_BITRATE });
-  output.addAudioTrack(source);
-  await output.start();
-
-  const samples = AudioSample.fromAudioBuffer(buffer, 0);
-  for (const sample of samples) {
-    try {
-      await source.add(sample);
-    } finally {
-      sample.close();
-    }
-  }
-
-  await output.finalize();
-
-  if (target.buffer === null) {
-    throw new Error("MP3 encoder finalized without output.");
-  }
-
-  return new Blob([target.buffer], { type: "audio/mpeg" });
-};
-
 export const makeExportArtifacts = async (
   buffer: AudioBuffer,
   baseName: string,
@@ -119,48 +77,21 @@ export const makeExportArtifacts = async (
 ): Promise<ExportArtifact[]> => {
   const safeBaseName = sanitizeBaseName(baseName);
   const wavBlob = encodeWavBlob(buffer);
-  const artifacts: ExportArtifact[] = [];
-  let fallbackReason: string | undefined;
-
-  try {
-    const mp3Blob = await encodeMp3Blob(buffer);
-    const decodedMp3 = await decodeAudioBlob(mp3Blob);
-    const mp3Verified = await verify(decodedMp3);
-
-    if (mp3Verified) {
-      artifacts.push({
-        kind: "mp3",
-        format: "mp3",
-        blob: mp3Blob,
-        fileName: `${safeBaseName}.mp3`,
-        mimeType: "audio/mpeg",
-        verified: true,
-        message: "MP3 export verified.",
-      });
-    } else {
-      fallbackReason = "MP3 export did not pass verification.";
-    }
-  } catch (error) {
-    fallbackReason = error instanceof Error ? error.message : "MP3 export failed.";
-  }
-
   let wavVerified = false;
+
   try {
     wavVerified = await verify(await decodeAudioBlob(wavBlob));
   } catch {
     wavVerified = await verify(buffer);
   }
 
-  artifacts.push({
+  return [{
     kind: "wav",
     format: "wav",
     blob: wavBlob,
     fileName: `${safeBaseName}.wav`,
     mimeType: "audio/wav",
     verified: wavVerified,
-    message: fallbackReason ?? (wavVerified ? "WAV export verified." : "WAV export ready; verification failed."),
-    fallbackReason,
-  });
-
-  return artifacts;
+    message: wavVerified ? "WAV export verified." : "WAV export ready; verification failed.",
+  }];
 };
