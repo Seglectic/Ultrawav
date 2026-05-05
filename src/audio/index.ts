@@ -274,6 +274,18 @@ export const detectEmbeddedPayload = async (
     return detectedFromRegions;
   }
 
+  await scanRegion(
+    buffer,
+    EMBED_START_SECONDS,
+    Math.min(duration, EMBED_START_SECONDS + DETECTION_WINDOW_SECONDS),
+    frames,
+  );
+
+  const detectedFromDefaultStart = assembleDetectedFrames(frames);
+  if (detectedFromDefaultStart !== null) {
+    return detectedFromDefaultStart;
+  }
+
   await scanRegion(buffer, 0, Math.min(duration, DETECTION_START_SECONDS), frames);
 
   const tailStart = Math.max(0, duration - DETECTION_TAIL_SECONDS);

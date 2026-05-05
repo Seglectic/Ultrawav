@@ -67,8 +67,9 @@ button:disabled {
   height: 100svh;
   display: grid;
   place-items: center;
-  padding: clamp(18px, 2.2vw, 30px) clamp(12px, 1.8vw, 24px);
+  padding: clamp(48px, 10vw, 80px);
   overflow: hidden;
+  opacity: 0.99;
 }
 
 .workbench {
@@ -325,7 +326,6 @@ textarea:focus {
     overflow: hidden;
     padding: 10px;
     place-items: stretch;
-    opacity: 0.85;
   }
 
   .workbench {

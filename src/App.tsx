@@ -497,8 +497,11 @@ export function App() {
         return Boolean(foundPayload);
       });
       const artifact = chooseDownloadArtifact(exportedArtifacts);
+      if (!artifact.verified) {
+        throw new Error("Export verification failed; payload was not downloaded.");
+      }
       downloadArtifact(artifact);
-      setActionNotice(artifact.verified ? "Export verified" : "WAV fallback downloaded");
+      setActionNotice("Export verified");
     } catch (error) {
       setActionNotice(errorMessage(error));
     } finally {

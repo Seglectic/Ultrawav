@@ -23,11 +23,13 @@ const WATERFALL_DEPTH = 5.8;
 const WATERFALL_WIDTH = 10.5;
 const WATERFALL_BASE_Y = -2.16;
 const WATERFALL_AMPLITUDE_HEIGHT = 3.75;
-const LIVE_BIN_COUNT = 96;
-const LIVE_HISTORY_STEPS = 72;
-const CARRIER_COLOR = new Color("#61dafb");
+const LIVE_BIN_COUNT = 72;
+const LIVE_HISTORY_STEPS = 56;
+const LIVE_FRAME_INTERVAL = 1 / 20;
+const PROFILE_FRAME_INTERVAL = 1 / 18;
+const CARRIER_COLOR = new Color("#54e7ff");
 const DATA_COLOR = new Color("#ff6b9d");
-const LIVE_COLOR = new Color("#f7d774");
+const LIVE_COLOR = new Color("#54e7ff");
 
 type SpectrogramRequestHandle = {
   promise: Promise<SpectrogramLayer>;
@@ -49,8 +51,8 @@ export function FourierVisualizer(props: FourierVisualizerProps) {
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <Canvas
         camera={{ position: [6.8, 4.6, 8.8], fov: 46, near: 0.1, far: 80 }}
-        dpr={[1, 1.6]}
-        gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
+        dpr={[1, 1.25]}
+        gl={{ antialias: false, alpha: true, powerPreference: "high-performance" }}
       >
         <color attach="background" args={["#080b11"]} />
         <fog attach="fog" args={["#080b11", 9, 18]} />
@@ -59,8 +61,7 @@ export function FourierVisualizer(props: FourierVisualizerProps) {
         <FourierScene {...props} />
         <OrbitControls
           enablePan={false}
-          enableDamping
-          dampingFactor={0.08}
+          enableDamping={false}
           minDistance={5.5}
           maxDistance={13}
           minPolarAngle={0.75}
@@ -69,7 +70,7 @@ export function FourierVisualizer(props: FourierVisualizerProps) {
         />
         <EffectComposer multisampling={0}>
           <SMAA />
-          <Bloom intensity={0.32} luminanceThreshold={0.34} luminanceSmoothing={0.58} mipmapBlur />
+          <Bloom intensity={0.28} luminanceThreshold={0.38} luminanceSmoothing={0.58} />
           <Vignette offset={0.22} darkness={0.58} />
         </EffectComposer>
       </Canvas>
@@ -85,8 +86,8 @@ function FourierScene(props: FourierVisualizerProps) {
     <group>
       <GridPlane />
       <LiveWaterfall frequencyData={props.liveFrequencyData} sampleRate={props.liveSampleRate} />
-      {carrierLayer ? <SpectrumProfile layer={carrierLayer} color={CARRIER_COLOR} opacity={0.52} playheadTime={props.playheadTime ?? 0} z={-2.48} size={0.048} gain={0.9} /> : null}
-      {dataLayer ? <SpectrumProfile layer={dataLayer} color={DATA_COLOR} opacity={0.52} playheadTime={props.playheadTime ?? 0} z={-2.48} size={0.048} gain={0.9} /> : null}
+      {carrierLayer ? <SpectrumProfile layer={carrierLayer} color={CARRIER_COLOR} opacity={0.5} playheadTime={props.playheadTime ?? 0} z={-2.48} size={0.048} gain={0.9} /> : null}
+      {dataLayer ? <SpectrumProfile layer={dataLayer} color={DATA_COLOR} opacity={0.88} playheadTime={props.playheadTime ?? 0} z={-2.45} size={0.088} gain={1.28} /> : null}
     </group>
   );
 }
@@ -225,10 +226,10 @@ function SpectrumProfile(props: {
   size: number;
   gain: number;
 }) {
-  const geometry = useMemo(
-    () => buildProfileGeometry(props.layer, props.color, props.playheadTime, props.z, props.gain),
-    [props.layer, props.color, props.playheadTime, props.z, props.gain],
-  );
+  const playheadTimeRef = useRef(props.playheadTime);
+  const lastTimeIndexRef = useRef(-1);
+  const lastWriteRef = useRef(0);
+  const geometry = useMemo(() => createProfileGeometry(props.layer), [props.layer]);
   const material = useMemo(
     () =>
       new PointsMaterial({
@@ -243,22 +244,71 @@ function SpectrumProfile(props: {
   );
 
   useEffect(() => {
+    playheadTimeRef.current = props.playheadTime;
+  }, [props.playheadTime]);
+
+  useEffect(() => {
+    lastTimeIndexRef.current = -1;
+    writeProfileGeometry(
+      geometry,
+      props.layer,
+      props.color,
+      profileTimeIndex(props.layer, playheadTimeRef.current),
+      props.z,
+      props.gain,
+    );
+  }, [geometry, props.color, props.gain, props.layer, props.z]);
+
+  useFrame((state) => {
+    if (state.clock.elapsedTime - lastWriteRef.current < PROFILE_FRAME_INTERVAL) {
+      return;
+    }
+
+    const timeIndex = profileTimeIndex(props.layer, playheadTimeRef.current);
+    if (timeIndex === lastTimeIndexRef.current) {
+      return;
+    }
+
+    lastWriteRef.current = state.clock.elapsedTime;
+    lastTimeIndexRef.current = timeIndex;
+    writeProfileGeometry(geometry, props.layer, props.color, timeIndex, props.z, props.gain);
+  });
+
+  useEffect(() => {
     return () => {
       geometry.dispose();
       material.dispose();
     };
   }, [geometry, material]);
 
-  return <points args={[geometry, material]} />;
+  return <points frustumCulled={false} args={[geometry, material]} />;
 }
 
-function buildProfileGeometry(layer: SpectrogramLayer, color: Color, playheadTime: number, z: number, gain: number): BufferGeometry {
+function createProfileGeometry(layer: SpectrogramLayer): BufferGeometry {
   const count = layer.binCount;
-  const positions = new Float32Array(count * 3);
-  const colors = new Float32Array(count * 3);
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(new Float32Array(count * 3), 3));
+  geometry.setAttribute("color", new BufferAttribute(new Float32Array(count * 3), 3));
+  geometry.setDrawRange(0, count);
+  return geometry;
+}
+
+function profileTimeIndex(layer: SpectrogramLayer, playheadTime: number): number {
   const duration = Math.max(layer.duration, 0.001);
   const timeRatio = Math.min(1, Math.max(0, playheadTime / duration));
-  const timeIndex = Math.min(layer.timeSteps - 1, Math.max(0, Math.round(timeRatio * Math.max(0, layer.timeSteps - 1))));
+  return Math.min(layer.timeSteps - 1, Math.max(0, Math.round(timeRatio * Math.max(0, layer.timeSteps - 1))));
+}
+
+function writeProfileGeometry(
+  geometry: BufferGeometry,
+  layer: SpectrogramLayer,
+  color: Color,
+  timeIndex: number,
+  z: number,
+  gain: number,
+): void {
+  const positions = geometry.attributes.position.array as Float32Array;
+  const colors = geometry.attributes.color?.array as Float32Array | undefined;
 
   for (let binIndex = 0; binIndex < layer.binCount; binIndex += 1) {
     const magnitude = Math.min(1, (layer.magnitudes[timeIndex * layer.binCount + binIndex] ?? 0) * gain);
@@ -267,15 +317,17 @@ function buildProfileGeometry(layer: SpectrogramLayer, color: Color, playheadTim
     positions[index * 3] = (frequencyRatio - 0.5) * WATERFALL_WIDTH;
     positions[index * 3 + 1] = WATERFALL_BASE_Y + magnitude * WATERFALL_AMPLITUDE_HEIGHT;
     positions[index * 3 + 2] = z;
-    colors[index * 3] = color.r * (0.1 + magnitude * 1.2);
-    colors[index * 3 + 1] = color.g * (0.1 + magnitude * 1.2);
-    colors[index * 3 + 2] = color.b * (0.1 + magnitude * 1.2);
+    if (colors) {
+      colors[index * 3] = color.r * (0.1 + magnitude * 1.2);
+      colors[index * 3 + 1] = color.g * (0.1 + magnitude * 1.2);
+      colors[index * 3 + 2] = color.b * (0.1 + magnitude * 1.2);
+    }
   }
 
-  const geometry = new BufferGeometry();
-  geometry.setAttribute("position", new BufferAttribute(positions, 3));
-  geometry.setAttribute("color", new BufferAttribute(colors, 3));
-  return geometry;
+  geometry.attributes.position.needsUpdate = true;
+  if (geometry.attributes.color) {
+    geometry.attributes.color.needsUpdate = true;
+  }
 }
 
 function normalizeLiveMagnitude(value: number, source: Float32Array | Uint8Array): number {
@@ -320,7 +372,7 @@ function LiveWaterfall(props: { frequencyData: Float32Array | Uint8Array | null;
   }, [binCount, historySteps]);
 
   useFrame((state) => {
-    if (state.clock.elapsedTime - lastDrawRef.current < 1 / 24) {
+    if (state.clock.elapsedTime - lastDrawRef.current < LIVE_FRAME_INTERVAL) {
       return;
     }
     lastDrawRef.current = state.clock.elapsedTime;
@@ -334,7 +386,7 @@ function LiveWaterfall(props: { frequencyData: Float32Array | Uint8Array | null;
       return;
     }
 
-    if (state.clock.elapsedTime - lastWriteRef.current >= 1 / 24) {
+    if (state.clock.elapsedTime - lastWriteRef.current >= LIVE_FRAME_INTERVAL) {
       const history = historyRef.current;
       const cursor = cursorRef.current;
       const rowOffset = cursor * binCount;
