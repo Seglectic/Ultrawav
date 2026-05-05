@@ -223,12 +223,36 @@ textarea:focus {
   gap: 10px;
 }
 
+.visualizer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.visualizer-head > span {
+  color: var(--acid);
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.visualizer-modes {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: min(430px, 100%);
+}
+
 .spectrum {
+  position: relative;
+  overflow: hidden;
   width: 100%;
   min-height: 300px;
   aspect-ratio: 16 / 5;
   border: 1px solid var(--line);
-  background: rgba(1, 3, 3, 0.78);
+  background:
+    linear-gradient(180deg, rgba(84, 231, 255, 0.08), transparent 36%),
+    rgba(1, 3, 3, 0.78);
   cursor: crosshair;
   outline: none;
   touch-action: manipulation;
@@ -236,6 +260,23 @@ textarea:focus {
 
 .spectrum:focus-visible {
   border-color: var(--cyan);
+}
+
+.spectrum canvas {
+  display: block;
+}
+
+.waveform-overlay {
+  position: absolute;
+  top: 12px;
+  left: 14px;
+  right: 14px;
+  z-index: 1;
+  width: calc(100% - 28px);
+  height: 72px;
+  pointer-events: none;
+  border-bottom: 1px solid rgba(238, 244, 221, 0.12);
+  mix-blend-mode: screen;
 }
 
 @media (max-width: 760px) {
@@ -289,6 +330,15 @@ textarea:focus {
   .transport {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .visualizer-head {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .visualizer-modes {
+    width: 100%;
   }
 
   .transport button,
