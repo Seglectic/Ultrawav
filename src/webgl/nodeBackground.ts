@@ -13,7 +13,8 @@ type AudioMetrics = {
   mid: number;
   treble: number;
   waveform: number;
-  playing: boolean;
+  activity: number;
+  pulse: number;
 };
 
 type NodeState = {
@@ -34,22 +35,24 @@ const MAX_CONNECTIONS = 420;
 const CAMERA_Z = 9;
 const SCENE_DEPTH = 7;
 const BASE_NODE_SIZE = 0.035;
-const NODE_SIZE_GAIN = 0.085;
-const PLAYING_NODE_SIZE_BOOST = 0.024;
-const PLAYING_OPACITY_BOOST = 0.14;
-const BASE_DRIFT_SPEED = 0.0035;
-const AUDIO_DRIFT_GAIN = 0.009;
+const NODE_SIZE_GAIN = 0.062;
+const ACTIVE_NODE_SIZE_BOOST = 0.014;
+const PULSE_NODE_SIZE_BOOST = 0.02;
+const ACTIVE_OPACITY_BOOST = 0.072;
+const PULSE_OPACITY_BOOST = 0.095;
+const BASE_DRIFT_SPEED = 0.0023;
+const AUDIO_DRIFT_GAIN = 0.0078;
 const FALLBACK_CONNECTION_DISTANCE_PX = 132;
 const FALLBACK_NODE_RADIUS_PX = 1.8;
-const FALLBACK_PLAYING_NODE_RADIUS_BOOST_PX = 1.6;
+const FALLBACK_BASE_DRIFT_SPEED = 0.31;
+const FALLBACK_ACTIVE_NODE_RADIUS_BOOST_PX = 0.72;
+const FALLBACK_PULSE_NODE_RADIUS_BOOST_PX = 1.08;
 const MIN_RENDER_SIZE_PX = 1;
 
 const COLORS = {
   background: "#05070d",
   node: "#dbeafe",
-  nodeActive: "#d8ff4f",
   connection: "#60a5fa",
-  connectionActive: "#54e7ff",
 };
 
 const SILENT_METRICS: AudioMetrics = {
@@ -57,7 +60,8 @@ const SILENT_METRICS: AudioMetrics = {
   mid: 0,
   treble: 0,
   waveform: 0,
-  playing: false,
+  activity: 0,
+  pulse: 0,
 };
 
 export function createAudioNodeField(canvas: HTMLCanvasElement): AudioNodeField {
@@ -135,6 +139,7 @@ function createThreeNodeField(canvas: HTMLCanvasElement): AudioNodeField {
   };
   let animationFrame = 0;
   let disposed = false;
+  let easedMetrics = { ...SILENT_METRICS };
 
   function update(input: AudioNodeFieldInput): void {
     latestInput = input;
@@ -145,17 +150,19 @@ function createThreeNodeField(canvas: HTMLCanvasElement): AudioNodeField {
       return;
     }
 
-    const metrics = metricsFromInput(latestInput);
+    easedMetrics = easeMetrics(easedMetrics, metricsFromInput(latestInput));
+    const metrics = easedMetrics;
     updateNodes(nodes, metrics);
     writePointPositions(nodes, pointPositions);
     pointPositionAttribute.needsUpdate = true;
-    pointMaterial.size = BASE_NODE_SIZE + metrics.treble * NODE_SIZE_GAIN + (metrics.playing ? PLAYING_NODE_SIZE_BOOST : 0);
-    pointMaterial.opacity = 0.76 + metrics.treble * 0.16 + (metrics.playing ? PLAYING_OPACITY_BOOST : 0);
-    pointMaterial.color.setStyle(metrics.playing ? COLORS.nodeActive : COLORS.node);
-    lineMaterial.opacity = 0.16 + metrics.mid * 0.46 + (metrics.playing ? PLAYING_OPACITY_BOOST : 0);
-    lineMaterial.color.setStyle(metrics.playing ? COLORS.connectionActive : COLORS.connection);
-    writeConnections(nodes, linePositions, lineGeometry, CONNECTION_DISTANCE + metrics.bass * 1.05);
-    points.rotation.y += 0.0008 + metrics.waveform * 0.002;
+    pointMaterial.size = BASE_NODE_SIZE
+      + metrics.treble * NODE_SIZE_GAIN
+      + metrics.activity * ACTIVE_NODE_SIZE_BOOST
+      + metrics.pulse * PULSE_NODE_SIZE_BOOST;
+    pointMaterial.opacity = clamp(0.68 + metrics.treble * 0.1 + metrics.activity * (ACTIVE_OPACITY_BOOST + 0.08) + metrics.pulse * PULSE_OPACITY_BOOST, 0, 0.94);
+    lineMaterial.opacity = clamp(0.11 + metrics.mid * 0.34 + metrics.activity * (ACTIVE_OPACITY_BOOST + 0.04) + metrics.pulse * PULSE_OPACITY_BOOST, 0, 0.56);
+    writeConnections(nodes, linePositions, lineGeometry, CONNECTION_DISTANCE + metrics.bass * 0.72 + metrics.pulse * 0.32);
+    points.rotation.y += 0.0007 + metrics.waveform * 0.0016 + metrics.pulse * 0.00135;
     lines.rotation.copy(points.rotation);
     renderer.render(scene, camera);
   }
@@ -207,6 +214,7 @@ function createFallbackNodeField(canvas: HTMLCanvasElement): AudioNodeField {
   };
   let animationFrame = 0;
   let disposed = false;
+  let easedMetrics = { ...SILENT_METRICS };
 
   function update(input: AudioNodeFieldInput): void {
     latestInput = input;
@@ -217,7 +225,8 @@ function createFallbackNodeField(canvas: HTMLCanvasElement): AudioNodeField {
       return;
     }
 
-    const metrics = metricsFromInput(latestInput);
+    easedMetrics = easeMetrics(easedMetrics, metricsFromInput(latestInput));
+    const metrics = easedMetrics;
     const width = canvas.clientWidth || window.innerWidth;
     const height = canvas.clientHeight || window.innerHeight;
     renderingContext.fillStyle = COLORS.background;
@@ -288,7 +297,7 @@ function createFallbackNodes(): FallbackNode[] {
 }
 
 function updateNodes(nodes: NodeState[], metrics: AudioMetrics): void {
-  const speed = BASE_DRIFT_SPEED + metrics.bass * AUDIO_DRIFT_GAIN + (metrics.playing ? AUDIO_DRIFT_GAIN : 0);
+  const speed = BASE_DRIFT_SPEED + metrics.bass * AUDIO_DRIFT_GAIN + metrics.activity * 0.006 + metrics.pulse * 0.0032;
   for (const node of nodes) {
     node.position.addScaledVector(node.velocity, speed);
     wrapAxis(node.position, "x", 6.2);
@@ -352,7 +361,7 @@ function writeConnections(
 }
 
 function updateFallbackNodes(nodes: FallbackNode[], width: number, height: number, metrics: AudioMetrics): void {
-  const speed = 0.45 + metrics.bass * 1.8 + (metrics.playing ? 0.55 : 0);
+  const speed = FALLBACK_BASE_DRIFT_SPEED + metrics.bass * 1.35 + metrics.activity * 0.56 + metrics.pulse * 0.62;
   for (const node of nodes) {
     node.x += (node.vx * speed) / Math.max(1, width);
     node.y += (node.vy * speed) / Math.max(1, height);
@@ -375,9 +384,9 @@ function drawFallbackConnections(
 ): void {
   const width = context.canvas.clientWidth || window.innerWidth;
   const height = context.canvas.clientHeight || window.innerHeight;
-  const distanceLimit = FALLBACK_CONNECTION_DISTANCE_PX + metrics.mid * 72;
-  context.strokeStyle = metrics.playing ? COLORS.connectionActive : COLORS.connection;
-  context.globalAlpha = 0.14 + metrics.mid * 0.42 + (metrics.playing ? 0.12 : 0);
+  const distanceLimit = FALLBACK_CONNECTION_DISTANCE_PX + metrics.mid * 52 + metrics.pulse * 34;
+  context.strokeStyle = COLORS.connection;
+  context.globalAlpha = clamp(0.1 + metrics.mid * 0.34 + metrics.activity * 0.11 + metrics.pulse * 0.1, 0, 0.5);
   context.lineWidth = 1;
 
   for (let firstIndex = 0; firstIndex < nodes.length; firstIndex += 1) {
@@ -410,15 +419,18 @@ function drawFallbackNodes(
 ): void {
   const width = context.canvas.clientWidth || window.innerWidth;
   const height = context.canvas.clientHeight || window.innerHeight;
-  context.fillStyle = metrics.playing ? COLORS.nodeActive : COLORS.node;
-  context.globalAlpha = 0.78 + metrics.treble * 0.12 + (metrics.playing ? 0.08 : 0);
+  context.fillStyle = COLORS.node;
+  context.globalAlpha = clamp(0.68 + metrics.treble * 0.1 + metrics.activity * 0.16 + metrics.pulse * 0.09, 0, 0.96);
 
   for (const node of nodes) {
     context.beginPath();
     context.arc(
       node.x * width,
       node.y * height,
-      FALLBACK_NODE_RADIUS_PX + metrics.treble * 3.4 + (metrics.playing ? FALLBACK_PLAYING_NODE_RADIUS_BOOST_PX : 0),
+      FALLBACK_NODE_RADIUS_PX
+        + metrics.treble * 2.65
+        + metrics.activity * FALLBACK_ACTIVE_NODE_RADIUS_BOOST_PX
+        + metrics.pulse * FALLBACK_PULSE_NODE_RADIUS_BOOST_PX,
       0,
       Math.PI * 2,
     );
@@ -429,16 +441,38 @@ function drawFallbackNodes(
 
 function metricsFromInput(input: AudioNodeFieldInput): AudioMetrics {
   if (!input.frequencyData && !input.timeData) {
-    return { ...SILENT_METRICS, playing: input.playing };
+    return { ...SILENT_METRICS };
   }
 
+  const bass = averageRange(input.frequencyData, 0, 0.18);
+  const mid = averageRange(input.frequencyData, 0.18, 0.58);
+  const treble = averageRange(input.frequencyData, 0.58, 1);
+  const waveform = waveformEnergy(input.timeData);
+  const pulse = input.playing ? clamp(bass * 1.05 + waveform * 0.5 + mid * 0.12, 0, 1) : 0;
+
   return {
-    bass: averageRange(input.frequencyData, 0, 0.18),
-    mid: averageRange(input.frequencyData, 0.18, 0.58),
-    treble: averageRange(input.frequencyData, 0.58, 1),
-    waveform: waveformEnergy(input.timeData),
-    playing: input.playing,
+    bass,
+    mid,
+    treble,
+    waveform,
+    activity: input.playing ? clamp(0.22 + bass * 0.48 + mid * 0.24 + waveform * 0.28, 0, 1) : 0,
+    pulse,
   };
+}
+
+function easeMetrics(current: AudioMetrics, target: AudioMetrics): AudioMetrics {
+  return {
+    bass: easeValue(current.bass, target.bass, 0.13),
+    mid: easeValue(current.mid, target.mid, 0.1),
+    treble: easeValue(current.treble, target.treble, 0.1),
+    waveform: easeValue(current.waveform, target.waveform, 0.14),
+    activity: easeValue(current.activity, target.activity, target.activity > current.activity ? 0.023 : 0.018),
+    pulse: easeValue(current.pulse, target.pulse, target.pulse > current.pulse ? 0.24 : 0.12),
+  };
+}
+
+function easeValue(current: number, target: number, amount: number): number {
+  return current + (target - current) * amount;
 }
 
 function averageRange(values: Uint8Array | null, startRatio: number, endRatio: number): number {
