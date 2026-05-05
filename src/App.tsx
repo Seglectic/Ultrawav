@@ -712,7 +712,7 @@ export function App() {
     || (carrierFile && carrierBuffer ? `${carrierFile.name} · ${formatDuration(carrierBuffer.duration)}` : "Drop audio here or click to select");
   const playLabel = playbackSnapshot.playing ? "Pause" : isPreparing ? "Applying..." : "Play";
   const exportLabel = isExporting ? "Exporting..." : "Export";
-  const transportNotice = isExporting ? "Exporting..." : isPreparing ? "Applying payload..." : actionNotice;
+  const transportNotice = isPreparing ? "Applying payload..." : actionNotice;
   const visualizerData = activeAugmented?.dataBuffer ?? (activeDetected ? detectedDataBuffer : null);
 
   return (

@@ -56,6 +56,31 @@ export const normalizeAudioBuffer = (buffer: AudioBuffer): AudioBuffer => {
   return buffer;
 };
 
+export const scaleAudioBufferToPeak = (buffer: AudioBuffer, targetPeak: number): AudioBuffer => {
+  let peak = 0;
+
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const samples = buffer.getChannelData(channel);
+    for (const sample of samples) {
+      peak = Math.max(peak, Math.abs(sample));
+    }
+  }
+
+  if (peak <= 0 || targetPeak <= 0) {
+    return buffer;
+  }
+
+  const gain = targetPeak / peak;
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const samples = buffer.getChannelData(channel);
+    for (let sample = 0; sample < samples.length; sample += 1) {
+      samples[sample] *= gain;
+    }
+  }
+
+  return buffer;
+};
+
 export const downmixWindow = (buffer: AudioBuffer, startSample: number, sampleCount: number): Float32Array => {
   const safeStart = Math.max(0, Math.min(buffer.length, startSample));
   const safeEnd = Math.max(safeStart, Math.min(buffer.length, safeStart + sampleCount));

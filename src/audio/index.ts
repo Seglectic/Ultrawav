@@ -1,4 +1,4 @@
-import { downmixWindow, mixMonoSignal, normalizeAudioBuffer, cloneAudioBuffer, lowPassAudioBuffer } from "./buffer";
+import { downmixWindow, mixMonoSignal, normalizeAudioBuffer, cloneAudioBuffer, lowPassAudioBuffer, scaleAudioBufferToPeak } from "./buffer";
 import { makeExportArtifacts } from "./export";
 import { assembleFrames, crc32, decodeFrame, encodeFrames, MAX_FILE_PAYLOAD_BYTES } from "./framing";
 import { decodeGgWave, encodeGgWave } from "../ggwave/adapter";
@@ -13,6 +13,7 @@ const FRAME_GAP_SECONDS = 0.25;
 const EMBED_SIGNAL_GAIN = 0.22;
 const EMBED_SIGNAL_FADE_SECONDS = 0.01;
 const CARRIER_LOW_PASS_HZ = 17_000;
+const DATA_VISUAL_PEAK = 0.92;
 const DETECTION_START_SECONDS = 90;
 const DETECTION_TAIL_SECONDS = 600;
 const DETECTION_WINDOW_SECONDS = 24;
@@ -114,8 +115,6 @@ export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput):
     cursor = mixMonoSignal(output, frame, cursor, EMBED_SIGNAL_GAIN) + frameGapSamples;
   }
 
-  normalizeAudioBuffer(output);
-
   const highlight: HighlightRegion = {
     kind: payload.kind,
     start: highlightStart / carrier.sampleRate,
@@ -124,6 +123,9 @@ export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput):
     endTime: cursor / carrier.sampleRate,
     label: frameLabel(payload),
   };
+  normalizeAudioBuffer(output);
+  const visualDataBuffer = await extractDataBufferFromRegions(output, [highlight])
+    ?? scaleAudioBufferToPeak(dataBuffer, DATA_VISUAL_PEAK);
   const checksum = crc32(payload.bytes);
   const embedded: DetectedPayload = payload.kind === "text"
     ? {
@@ -152,7 +154,7 @@ export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput):
 
   return {
     buffer: output,
-    dataBuffer,
+    dataBuffer: visualDataBuffer,
     payload,
     highlights: [highlight],
     regions: [highlight],
@@ -306,6 +308,13 @@ export const extractEmbeddedDataBuffer = async (
   buffer: AudioBuffer,
   regions: readonly HighlightRegion[],
 ): Promise<AudioBuffer | null> => {
+  return extractDataBufferFromRegions(buffer, regions);
+};
+
+async function extractDataBufferFromRegions(
+  buffer: AudioBuffer,
+  regions: readonly HighlightRegion[],
+): Promise<AudioBuffer | null> {
   const usableRegions = regions.filter((region) => region.end > region.start);
   if (usableRegions.length === 0) {
     return null;
@@ -333,8 +342,8 @@ export const extractEmbeddedDataBuffer = async (
     }
   }
 
-  return normalizeAudioBuffer(output);
-};
+  return scaleAudioBufferToPeak(output, DATA_VISUAL_PEAK);
+}
 
 export const downloadArtifact = (artifact: ExportArtifact): void => {
   const url = URL.createObjectURL(artifact.blob);
