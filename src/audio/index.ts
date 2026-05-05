@@ -1,4 +1,4 @@
-import { downmixWindow, mixMonoSignal, normalizeAudioBuffer, cloneAudioBuffer, lowPassAudioBuffer } from "./buffer";
+import { downmixWindow, mixMonoSignal, normalizeAudioBuffer, cloneAudioBuffer, lowPassAudioBuffer, scaleAudioBufferToPeak } from "./buffer";
 import { makeExportArtifacts } from "./export";
 import { assembleFrames, crc32, decodeFrame, encodeFrames, MAX_FILE_PAYLOAD_BYTES } from "./framing";
 import { decodeGgWave, encodeGgWave } from "../ggwave/adapter";
@@ -13,14 +13,24 @@ const FRAME_GAP_SECONDS = 0.25;
 const EMBED_SIGNAL_GAIN = 0.22;
 const EMBED_SIGNAL_FADE_SECONDS = 0.01;
 const CARRIER_LOW_PASS_HZ = 17_000;
+const DATA_VISUAL_PEAK = 0.92;
 const DETECTION_START_SECONDS = 90;
 const DETECTION_TAIL_SECONDS = 600;
 const DETECTION_WINDOW_SECONDS = 24;
 const DETECTION_STEP_SECONDS = 1;
+const DETECTED_FRAME_REGION_SECONDS = 8;
 
 type AudioContextWindow = Window & {
   AudioContext?: typeof AudioContext;
   webkitAudioContext?: typeof AudioContext;
+};
+
+type DecodedFrame = NonNullable<ReturnType<typeof decodeFrame>>;
+
+type ScannedFrame = {
+  frame: DecodedFrame;
+  start: number;
+  end: number;
 };
 
 const textEncoder = new TextEncoder();
@@ -105,8 +115,6 @@ export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput):
     cursor = mixMonoSignal(output, frame, cursor, EMBED_SIGNAL_GAIN) + frameGapSamples;
   }
 
-  normalizeAudioBuffer(output);
-
   const highlight: HighlightRegion = {
     kind: payload.kind,
     start: highlightStart / carrier.sampleRate,
@@ -115,6 +123,9 @@ export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput):
     endTime: cursor / carrier.sampleRate,
     label: frameLabel(payload),
   };
+  normalizeAudioBuffer(output);
+  const visualDataBuffer = await extractDataBufferFromRegions(output, [highlight])
+    ?? scaleAudioBufferToPeak(dataBuffer, DATA_VISUAL_PEAK);
   const checksum = crc32(payload.bytes);
   const embedded: DetectedPayload = payload.kind === "text"
     ? {
@@ -143,7 +154,7 @@ export const embedPayload = async (carrier: AudioBuffer, payload: PayloadInput):
 
   return {
     buffer: output,
-    dataBuffer,
+    dataBuffer: visualDataBuffer,
     payload,
     highlights: [highlight],
     regions: [highlight],
@@ -174,7 +185,7 @@ const scanRegion = async (
   buffer: AudioBuffer,
   startSeconds: number,
   endSeconds: number,
-  frameMap: Map<string, ReturnType<typeof decodeFrame>>,
+  frameMap: Map<string, ScannedFrame>,
 ): Promise<void> => {
   const windowSamples = Math.round(DETECTION_WINDOW_SECONDS * buffer.sampleRate);
   const stepSamples = Math.round(DETECTION_STEP_SECONDS * buffer.sampleRate);
@@ -206,25 +217,43 @@ const scanRegion = async (
       frame.chunkIndex,
       frame.chunkTotal,
     ].join(":");
-    frameMap.set(key, frame);
+    frameMap.set(key, {
+      frame,
+      start: cursor / buffer.sampleRate,
+      end: Math.min(endSeconds, cursor / buffer.sampleRate + DETECTED_FRAME_REGION_SECONDS),
+    });
   }
 };
 
-const assembleDetectedFrames = (frames: Map<string, ReturnType<typeof decodeFrame>>): DetectedPayload | null => {
-  const frameList = [...frames.values()].filter((frame) => frame !== null);
-  const groups = new Map<string, typeof frameList>();
+const assembleDetectedFrames = (frames: Map<string, ScannedFrame>): DetectedPayload | null => {
+  const frameList = [...frames.values()];
+  const groups = new Map<string, ScannedFrame[]>();
 
-  for (const frame of frameList) {
+  for (const scanned of frameList) {
+    const frame = scanned.frame;
     const key = [frame.kind, frame.fileName, frame.mimeType, frame.size, frame.crc32, frame.chunkTotal].join(":");
     const group = groups.get(key) ?? [];
-    group.push(frame);
+    group.push(scanned);
     groups.set(key, group);
   }
 
   for (const group of groups.values()) {
-    const payload = assembleFrames(group);
+    const payload = assembleFrames(group.map((scanned) => scanned.frame));
     if (payload !== null) {
-      return payload;
+      const start = Math.min(...group.map((scanned) => scanned.start));
+      const end = Math.max(...group.map((scanned) => scanned.end));
+      const region: HighlightRegion = {
+        kind: payload.kind,
+        start,
+        end,
+        startTime: start,
+        endTime: end,
+        label: payload.kind === "file" ? payload.fileName : "Text payload",
+      };
+      return {
+        ...payload,
+        regions: [region],
+      };
     }
   }
 
@@ -235,7 +264,7 @@ export const detectEmbeddedPayload = async (
   buffer: AudioBuffer,
   regions: readonly HighlightRegion[] = [],
 ): Promise<DetectedPayload | null> => {
-  const frames = new Map<string, ReturnType<typeof decodeFrame>>();
+  const frames = new Map<string, ScannedFrame>();
   const duration = buffer.duration;
 
   for (const region of regions) {
@@ -245,6 +274,18 @@ export const detectEmbeddedPayload = async (
   const detectedFromRegions = assembleDetectedFrames(frames);
   if (detectedFromRegions !== null) {
     return detectedFromRegions;
+  }
+
+  await scanRegion(
+    buffer,
+    EMBED_START_SECONDS,
+    Math.min(duration, EMBED_START_SECONDS + DETECTION_WINDOW_SECONDS),
+    frames,
+  );
+
+  const detectedFromDefaultStart = assembleDetectedFrames(frames);
+  if (detectedFromDefaultStart !== null) {
+    return detectedFromDefaultStart;
   }
 
   await scanRegion(buffer, 0, Math.min(duration, DETECTION_START_SECONDS), frames);
@@ -262,6 +303,47 @@ export const exportAudio = (
   baseName: string,
   verify: (buffer: AudioBuffer) => Promise<boolean>,
 ): Promise<ExportArtifact[]> => makeExportArtifacts(buffer, baseName, verify);
+
+export const extractEmbeddedDataBuffer = async (
+  buffer: AudioBuffer,
+  regions: readonly HighlightRegion[],
+): Promise<AudioBuffer | null> => {
+  return extractDataBufferFromRegions(buffer, regions);
+};
+
+async function extractDataBufferFromRegions(
+  buffer: AudioBuffer,
+  regions: readonly HighlightRegion[],
+): Promise<AudioBuffer | null> {
+  const usableRegions = regions.filter((region) => region.end > region.start);
+  if (usableRegions.length === 0) {
+    return null;
+  }
+
+  const lowPassed = await lowPassAudioBuffer(buffer, CARRIER_LOW_PASS_HZ);
+  const output = new AudioBuffer({
+    length: buffer.length,
+    numberOfChannels: buffer.numberOfChannels,
+    sampleRate: buffer.sampleRate,
+  });
+
+  for (const region of usableRegions) {
+    const startSample = Math.max(0, Math.floor(region.start * buffer.sampleRate));
+    const endSample = Math.min(buffer.length, Math.ceil(region.end * buffer.sampleRate));
+
+    for (let channelIndex = 0; channelIndex < buffer.numberOfChannels; channelIndex += 1) {
+      const source = buffer.getChannelData(channelIndex);
+      const low = lowPassed.getChannelData(channelIndex);
+      const target = output.getChannelData(channelIndex);
+
+      for (let sampleIndex = startSample; sampleIndex < endSample; sampleIndex += 1) {
+        target[sampleIndex] = source[sampleIndex] - low[sampleIndex];
+      }
+    }
+  }
+
+  return scaleAudioBufferToPeak(output, DATA_VISUAL_PEAK);
+}
 
 export const downloadArtifact = (artifact: ExportArtifact): void => {
   const url = URL.createObjectURL(artifact.blob);

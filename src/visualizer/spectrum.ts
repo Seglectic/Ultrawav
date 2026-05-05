@@ -37,7 +37,7 @@ const AMPLITUDE_FLOOR = 0.000_001;
 
 const COLORS = {
   background: "#080b11",
-  carrier: "#61dafb",
+  carrier: "#54e7ff",
   data: "#ff6b9d",
   startPacket: "rgba(91, 141, 255, 0.26)",
   tail: "rgba(255, 190, 92, 0.24)",

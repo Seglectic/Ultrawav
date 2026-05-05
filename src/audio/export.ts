@@ -1,8 +1,13 @@
 import type { ExportArtifact } from "../types/payload";
 
-const PCM_16_MAX = 32767;
-const PCM_16_MIN = -32768;
 const WAV_HEADER_BYTES = 44;
+const WAV_FORMAT_IEEE_FLOAT = 3;
+const WAV_BITS_PER_SAMPLE = 32;
+
+type AudioContextWindow = Window & {
+  AudioContext?: typeof AudioContext;
+  webkitAudioContext?: typeof AudioContext;
+};
 
 const sanitizeBaseName = (baseName: string): string => {
   const clean = baseName.trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "");
@@ -10,7 +15,13 @@ const sanitizeBaseName = (baseName: string): string => {
 };
 
 const decodeAudioBlob = async (blob: Blob): Promise<AudioBuffer> => {
-  const AudioContextConstructor = window.AudioContext;
+  const contextWindow = window as AudioContextWindow;
+  const AudioContextConstructor = contextWindow.AudioContext ?? contextWindow.webkitAudioContext;
+
+  if (AudioContextConstructor === undefined) {
+    throw new Error("Web Audio is unavailable in this browser.");
+  }
+
   const context = new AudioContextConstructor();
 
   try {
@@ -21,7 +32,7 @@ const decodeAudioBlob = async (blob: Blob): Promise<AudioBuffer> => {
 };
 
 export const encodeWavBlob = (buffer: AudioBuffer): Blob => {
-  const bytesPerSample = 2;
+  const bytesPerSample = WAV_BITS_PER_SAMPLE / 8;
   const blockAlign = buffer.numberOfChannels * bytesPerSample;
   const dataBytes = buffer.length * blockAlign;
   const wavBytes = new Uint8Array(WAV_HEADER_BYTES + dataBytes);
@@ -42,7 +53,7 @@ export const encodeWavBlob = (buffer: AudioBuffer): Blob => {
   writeAscii("fmt ");
   view.setUint32(offset, 16, true);
   offset += 4;
-  view.setUint16(offset, 1, true);
+  view.setUint16(offset, WAV_FORMAT_IEEE_FLOAT, true);
   offset += 2;
   view.setUint16(offset, buffer.numberOfChannels, true);
   offset += 2;
@@ -52,7 +63,7 @@ export const encodeWavBlob = (buffer: AudioBuffer): Blob => {
   offset += 4;
   view.setUint16(offset, blockAlign, true);
   offset += 2;
-  view.setUint16(offset, 16, true);
+  view.setUint16(offset, WAV_BITS_PER_SAMPLE, true);
   offset += 2;
   writeAscii("data");
   view.setUint32(offset, dataBytes, true);
@@ -61,8 +72,7 @@ export const encodeWavBlob = (buffer: AudioBuffer): Blob => {
   for (let sample = 0; sample < buffer.length; sample += 1) {
     for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
       const clamped = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[sample]));
-      const intSample = clamped < 0 ? clamped * -PCM_16_MIN : clamped * PCM_16_MAX;
-      view.setInt16(offset, Math.round(intSample), true);
+      view.setFloat32(offset, clamped, true);
       offset += bytesPerSample;
     }
   }
@@ -82,7 +92,7 @@ export const makeExportArtifacts = async (
   try {
     wavVerified = await verify(await decodeAudioBlob(wavBlob));
   } catch {
-    wavVerified = await verify(buffer);
+    wavVerified = false;
   }
 
   return [{
