@@ -5,7 +5,7 @@ import Icons from "unplugin-icons/vite";
 import { defineConfig } from "vite-plus";
 
 export default defineConfig({
-  base: "/ultrawave/",
+  base: "/Ultrawav/",
   plugins: [
     react(),
     AutoImport({
