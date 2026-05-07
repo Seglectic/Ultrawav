@@ -4,8 +4,8 @@ import IconsResolver from "unplugin-icons/resolver";
 import Icons from "unplugin-icons/vite";
 import { defineConfig } from "vite-plus";
 
-export default defineConfig({
-  base: "/Ultrawav/",
+export default defineConfig(({ command }) => ({
+  base: command === "build" ? "/Ultrawav/" : "/",
   plugins: [
     react(),
     AutoImport({
@@ -20,4 +20,4 @@ export default defineConfig({
     Icons({ compiler: "jsx", jsx: "react" }),
   ],
   lint: { options: { typeAware: true, typeCheck: true } },
-});
+}));
